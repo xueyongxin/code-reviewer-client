@@ -329,18 +329,27 @@ const ChatPage = (): JSX.Element => {
   }
 
   const sendContent = async (content: string): Promise<void> => {
+    const boundSessionId = activeChatId
     setSending(true)
     setDraft('')
     setCmdOpen(false)
     try {
       const session = await window.electronAPI.sendChatMessage({
-        sessionId: activeChatId ?? undefined,
+        sessionId: boundSessionId ?? undefined,
         content,
         reportId
       })
-      setActiveChatId(session.id)
-      setActive(session)
       await refreshChatSessions(session.id)
+      // 发送中途若已切换会话，不把回复刷到错误会话
+      const currentId = useAppStore.getState().activeChatId
+      const stillOnBound =
+        boundSessionId == null
+          ? currentId == null || currentId === session.id
+          : currentId === boundSessionId
+      if (stillOnBound) {
+        setActiveChatId(session.id)
+        setActive(session)
+      }
     } catch (error) {
       message.error(error instanceof Error ? error.message : '发送失败')
     } finally {
