@@ -3,6 +3,7 @@ import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { initDatabase } from './database/db'
 import { getAppConfig, redactConfigForRenderer } from './config/store'
+import { configureAutoUpdater } from './updater'
 import { mcpRegistry } from './mcp-manager/registry'
 import { warmMcpRepoCache } from './review-engine/mcp-repos'
 import {
@@ -139,6 +140,11 @@ if (!gotLock) {
     bindAuthUrlHandler()
     registerIpcHandlers(() => mainWindow)
     createWindow()
+
+    const bootConfig = getAppConfig()
+    if (bootConfig.updateFeedUrl) {
+      configureAutoUpdater(bootConfig.updateFeedUrl)
+    }
 
     const bootUrl = extractProtocolUrl(process.argv)
     if (bootUrl) dispatchAuthUrl(bootUrl)

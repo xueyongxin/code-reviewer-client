@@ -2,6 +2,7 @@ import { shell } from 'electron'
 import { randomUUID } from 'crypto'
 import type { AppConfig, CloudAccountConfig, ReviewReport } from '../../shared/types'
 import { getAppConfig, saveAppConfig } from '../config/store'
+import { configureAutoUpdater } from '../updater'
 import { getLatestReviewReport } from '../database/db'
 import { startLoopbackAuthServer } from './loopback-auth'
 
@@ -180,9 +181,11 @@ export const cloudSyncEndpoints = async (): Promise<AppConfig> => {
     })
     // 更新源写入应用配置（配置中心权威）
     if (typeof data.updateFeedUrl === 'string') {
+      const feed = data.updateFeedUrl.trim()
+      if (feed) configureAutoUpdater(feed)
       return saveAppConfig({
         ...nextCloud,
-        updateFeedUrl: data.updateFeedUrl.trim()
+        updateFeedUrl: feed
       })
     }
     return nextCloud

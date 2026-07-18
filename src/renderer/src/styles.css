@@ -3842,6 +3842,11 @@ body.platform-linux .app-titlebar-traffic-space {
   cursor: not-allowed;
 }
 
+.chat-action-btn.is-on {
+  color: var(--accent, #16a34a);
+  background: rgba(22, 163, 74, 0.12);
+}
+
 .chat-composer-wrap {
   position: relative;
   flex-shrink: 0;

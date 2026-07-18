@@ -19,10 +19,12 @@ protocols:
   schemes:
     - codereviewer
 mac:
+  icon: resources/icon.png
   target:
     - dmg
   category: public.app-category.developer-tools
 win:
+  icon: resources/icon.png
   target:
     - target: portable
       arch:
@@ -34,6 +36,7 @@ nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
 linux:
+  icon: resources/icon.png
   target:
     - target: AppImage
       arch:

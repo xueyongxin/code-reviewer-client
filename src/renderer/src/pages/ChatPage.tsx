@@ -97,8 +97,10 @@ const ChatPage = (): JSX.Element => {
   const [commands, setCommands] = useState<ChatCommandDef[]>([])
   const [cmdOpen, setCmdOpen] = useState(false)
   const [cmdIndex, setCmdIndex] = useState(0)
+  const [feedback, setFeedback] = useState<Record<string, 'up' | 'down'>>({})
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const loadSeqRef = useRef(0)
 
   const reportOptions = useMemo(() => {
@@ -357,6 +359,32 @@ const ChatPage = (): JSX.Element => {
     }
   }
 
+  const regenerateLast = async (): Promise<void> => {
+    if (sending || !active?.messages?.length) return
+    const lastUser = [...active.messages].reverse().find((m) => m.role === 'user')
+    if (!lastUser?.content) {
+      message.info('没有可重新生成的用户消息')
+      return
+    }
+    await sendContent(lastUser.content)
+  }
+
+  const attachFiles = async (files: FileList | null): Promise<void> => {
+    if (!files?.length) return
+    const parts: string[] = []
+    for (const file of Array.from(files).slice(0, 5)) {
+      if (file.size > 200 * 1024) {
+        message.warning(`${file.name} 超过 200KB，已跳过`)
+        continue
+      }
+      const text = await file.text()
+      parts.push(`【附件 ${file.name}】\n\`\`\`\n${text.slice(0, 12000)}\n\`\`\``)
+    }
+    if (!parts.length) return
+    setDraft((prev) => (prev ? `${prev}\n\n${parts.join('\n\n')}` : parts.join('\n\n')))
+    message.success(`已附加 ${parts.length} 个文件到输入框`)
+  }
+
   const applyCommand = async (cmd: ChatCommandDef, args = ''): Promise<void> => {
     setCmdOpen(false)
     if (LOCAL_COMMAND_KEYS.has(cmd.key)) {
@@ -489,17 +517,34 @@ const ChatPage = (): JSX.Element => {
                       >
                         <CopyOutlined />
                       </button>
-                      <button type="button" className="chat-action-btn" title="有用">
+                      <button
+                        type="button"
+                        className={`chat-action-btn ${feedback[msg.id] === 'up' ? 'is-on' : ''}`}
+                        title="有用"
+                        onClick={() => {
+                          setFeedback((f) => ({ ...f, [msg.id]: 'up' }))
+                          message.success('已记录反馈')
+                        }}
+                      >
                         <LikeOutlined />
                       </button>
-                      <button type="button" className="chat-action-btn" title="无用">
+                      <button
+                        type="button"
+                        className={`chat-action-btn ${feedback[msg.id] === 'down' ? 'is-on' : ''}`}
+                        title="无用"
+                        onClick={() => {
+                          setFeedback((f) => ({ ...f, [msg.id]: 'down' }))
+                          message.success('已记录反馈')
+                        }}
+                      >
                         <DislikeOutlined />
                       </button>
                       <button
                         type="button"
                         className="chat-action-btn"
-                        title="重新生成（即将支持）"
-                        disabled
+                        title="重新生成"
+                        disabled={sending || !isLastAssistant}
+                        onClick={() => void regenerateLast()}
                       >
                         <ReloadOutlined />
                       </button>
@@ -595,9 +640,25 @@ const ChatPage = (): JSX.Element => {
               >
                 <AppstoreOutlined />
               </button>
-              <button type="button" className="chat-icon-btn" title="附件（即将支持）">
+              <button
+                type="button"
+                className="chat-icon-btn"
+                title="附加文本文件"
+                onClick={() => fileInputRef.current?.click()}
+              >
                 <PaperClipOutlined />
               </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept=".txt,.md,.json,.yml,.yaml,.ts,.tsx,.js,.jsx,.py,.java,.go,.rs,.css,.html"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  void attachFiles(e.target.files)
+                  e.target.value = ''
+                }}
+              />
               <Select
                 allowClear
                 size="small"

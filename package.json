@@ -27,6 +27,7 @@
     "@modelcontextprotocol/sdk": "^1.12.1",
     "better-sqlite3": "^11.8.1",
     "electron-store": "^8.2.0",
+    "electron-updater": "^6.3.9",
     "js-yaml": "^5.2.1"
   },
   "devDependencies": {
@@ -77,12 +78,14 @@
       ]
     },
     "mac": {
+      "icon": "resources/icon.png",
       "target": [
         "dmg"
       ],
       "category": "public.app-category.developer-tools"
     },
     "win": {
+      "icon": "resources/icon.png",
       "target": [
         {
           "target": "portable",
@@ -98,11 +101,8 @@
         }
       ]
     },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
-    },
     "linux": {
+      "icon": "resources/icon.png",
       "target": [
         {
           "target": "AppImage",
@@ -112,6 +112,10 @@
         }
       ],
       "category": "Development"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     }
   }
 }
