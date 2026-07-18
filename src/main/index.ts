@@ -82,6 +82,7 @@ if (!gotLock) {
 
   const createWindow = (): void => {
     const isMac = process.platform === 'darwin'
+    const iconPath = join(__dirname, '../../resources/icon.png')
     mainWindow = new BrowserWindow({
       width: 1280,
       height: 860,
@@ -90,6 +91,7 @@ if (!gotLock) {
       show: false,
       title: 'Code Reviewer Client',
       backgroundColor: '#ffffff',
+      icon: iconPath,
       // macOS：隐藏系统黑标题栏，红绿灯嵌入内容区（与 Cursor 同款）
       ...(isMac
         ? {
