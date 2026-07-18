@@ -575,6 +575,7 @@ const ModelManagePanel = ({ config, saving, onPersist }: Props): JSX.Element => 
                 </span>
               }
               name="apiKey"
+              extra="已保存的密钥显示为 ••••；留空或保持掩码则不修改"
             >
               <Input.Password className="mono" placeholder="sk-…" />
             </Form.Item>

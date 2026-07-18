@@ -169,14 +169,23 @@ export const cloudSyncEndpoints = async (): Promise<AppConfig> => {
   const config = getAppConfig()
   const bootstrapBase = (cloudOf(config).apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
   try {
-    const data = await apiRequest<{ apiBase?: string; authWebBase?: string }>(
-      '/api/v1/public/client-config',
-      { apiBase: bootstrapBase }
-    )
-    return persistCloud({
+    const data = await apiRequest<{
+      apiBase?: string
+      authWebBase?: string
+      updateFeedUrl?: string
+    }>('/api/v1/public/client-config', { apiBase: bootstrapBase })
+    const nextCloud = await persistCloud({
       apiBase: (data.apiBase || bootstrapBase).replace(/\/$/, ''),
       authWebBase: (data.authWebBase || DEFAULT_AUTH_WEB_BASE).replace(/\/$/, '')
     })
+    // 更新源写入应用配置（配置中心权威）
+    if (typeof data.updateFeedUrl === 'string') {
+      return saveAppConfig({
+        ...nextCloud,
+        updateFeedUrl: data.updateFeedUrl.trim()
+      })
+    }
+    return nextCloud
   } catch {
     // 离线时沿用本地/默认地址
     return persistCloud({

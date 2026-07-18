@@ -1425,7 +1425,8 @@ const ConfigPage = ({ open, onClose, initialSection = 'cloud' }: ConfigPageProps
         <div className="mcp-modal-body">
           <p className="mcp-json-hint">
             请复制 MCP Servers 介绍页中的 JSON 配置（优先使用 NPX 或 UVX
-            配置）并粘贴到输入框中。
+            配置）并粘贴到输入框中。TOKEN / API_KEY 等密钥已脱敏显示为
+            ••••，保持掩码则不修改已保存密钥。
           </p>
           <div className="mcp-json-editor">
             <div className="mcp-json-gutter" aria-hidden>

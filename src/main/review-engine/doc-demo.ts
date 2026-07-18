@@ -16,6 +16,7 @@ export interface DocDemoConfig {
 }
 
 const candidateDocPaths = (): string[] => {
+  // 仅相对路径：工作区 / 应用旁；禁止写死本机绝对路径
   const cwd = process.cwd()
   const appPath = app.getAppPath()
   return [
@@ -24,7 +25,6 @@ const candidateDocPaths = (): string[] => {
     join(appPath, '..', '需求文档.md'),
     join(appPath, '..', '..', '需求文档.md'),
     join(appPath, '../../../需求文档.md'),
-    '/Volumes/data/workspace/cursor/code/需求文档.md'
   ]
 }
 

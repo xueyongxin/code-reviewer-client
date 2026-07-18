@@ -1,11 +1,41 @@
 import Store from 'electron-store'
-import { safeStorage } from 'electron'
 import type { AppConfig, LlmProviderConfig, McpMarketplaceItem, McpPreset } from '../../shared/types'
 import { DEFAULT_RULE_IDS } from '../review-engine/static-rules'
 import { getAppConfigPayload, saveAppConfigPayload } from '../database/db'
 import marketplaceSeed from './mcp-marketplace-seed.json'
+import {
+  ENC_AES_PREFIX,
+  ENC_SS_PREFIX,
+  decryptEnvMap,
+  decryptSecret,
+  encryptEnvMap,
+  encryptSecret,
+  looksLikeSecretEnvKey,
+  maskEnvMap,
+  maskSecret,
+  mergeEnvMaps,
+  mergeSecretField
+} from './secrets'
 
-const ENC_PREFIX = 'enc::'
+const isDiskEncrypted = (value?: string): boolean =>
+  !!value &&
+  (value.startsWith(ENC_SS_PREFIX) || value.startsWith(ENC_AES_PREFIX))
+
+/** 检测库内是否仍有明文密钥（升级后一次性加密写回） */
+const hasPlaintextSecretsOnDisk = (raw: AppConfig): boolean => {
+  const check = (v?: string) => Boolean(v && !isDiskEncrypted(v))
+  if (check(raw.githubToken) || check(raw.llmApiKey)) return true
+  if (check(raw.cloud?.accessToken) || check(raw.cloud?.refreshToken)) return true
+  for (const p of raw.llmProviders ?? []) {
+    if (check(p.apiKey)) return true
+  }
+  for (const s of raw.mcpServers ?? []) {
+    for (const [k, v] of Object.entries(s.env ?? {})) {
+      if (looksLikeSecretEnvKey(k) && check(v)) return true
+    }
+  }
+  return false
+}
 
 const MARKETPLACE_SEED = marketplaceSeed as McpMarketplaceItem[]
 
@@ -61,26 +91,6 @@ const legacyStore = new Store<{ config: AppConfig }>({
   defaults: { config: defaults }
 })
 
-const encryptSecret = (value?: string): string => {
-  if (!value) return ''
-  if (value.startsWith(ENC_PREFIX)) return value
-  if (!safeStorage.isEncryptionAvailable()) return value
-  const encrypted = safeStorage.encryptString(value)
-  return `${ENC_PREFIX}${encrypted.toString('base64')}`
-}
-
-const decryptSecret = (value?: string): string => {
-  if (!value) return ''
-  if (!value.startsWith(ENC_PREFIX)) return value
-  if (!safeStorage.isEncryptionAvailable()) return value.slice(ENC_PREFIX.length)
-  try {
-    const buf = Buffer.from(value.slice(ENC_PREFIX.length), 'base64')
-    return safeStorage.decryptString(buf)
-  } catch {
-    return ''
-  }
-}
-
 const withDecryptedSecrets = (config: AppConfig): AppConfig => ({
   ...config,
   githubToken: decryptSecret(config.githubToken),
@@ -88,6 +98,10 @@ const withDecryptedSecrets = (config: AppConfig): AppConfig => ({
   llmProviders: (config.llmProviders ?? []).map((p) => ({
     ...p,
     apiKey: decryptSecret(p.apiKey)
+  })),
+  mcpServers: (config.mcpServers ?? []).map((s) => ({
+    ...s,
+    env: decryptEnvMap(s.env)
   })),
   cloud: config.cloud
     ? {
@@ -105,6 +119,10 @@ const withEncryptedSecrets = (config: AppConfig): AppConfig => ({
   llmProviders: (config.llmProviders ?? []).map((p) => ({
     ...p,
     apiKey: encryptSecret(p.apiKey)
+  })),
+  mcpServers: (config.mcpServers ?? []).map((s) => ({
+    ...s,
+    env: encryptEnvMap(s.env)
   })),
   cloud: config.cloud
     ? {
@@ -233,8 +251,83 @@ const ensureMarketplaceCatalog = (config: AppConfig): AppConfig => {
   return next
 }
 
+/** 主进程内部：解密后的完整配置（含密钥明文） */
 export const getAppConfig = (): AppConfig => {
-  return ensureMarketplaceCatalog(normalizeConfig(loadRawConfig()))
+  const raw = loadRawConfig()
+  const config = ensureMarketplaceCatalog(normalizeConfig(raw))
+  // 升级迁移：历史明文密钥立即加密落盘
+  if (hasPlaintextSecretsOnDisk(raw)) {
+    const encrypted = withEncryptedSecrets(config)
+    saveAppConfigPayload(encrypted)
+    try {
+      legacyStore.set('config', encrypted)
+    } catch {
+      // ignore
+    }
+  }
+  return config
+}
+
+/**
+ * 渲染进程可见配置：密钥类字段脱敏，避免 XSS / DevTools 直接读到明文
+ */
+export const redactConfigForRenderer = (config: AppConfig): AppConfig => ({
+  ...config,
+  githubToken: maskSecret(config.githubToken),
+  llmApiKey: maskSecret(config.llmApiKey),
+  llmProviders: (config.llmProviders ?? []).map((p) => ({
+    ...p,
+    apiKey: maskSecret(p.apiKey)
+  })),
+  mcpServers: (config.mcpServers ?? []).map((s) => ({
+    ...s,
+    env: maskEnvMap(s.env)
+  })),
+  cloud: config.cloud
+    ? {
+        ...config.cloud,
+        accessToken: maskSecret(config.cloud.accessToken),
+        refreshToken: maskSecret(config.cloud.refreshToken)
+      }
+    : config.cloud
+})
+
+/**
+ * 渲染进程回写时合并密钥：掩码 / 未改字段保留原值
+ */
+export const mergeSecretsFromExisting = (
+  incoming: AppConfig,
+  existing: AppConfig
+): AppConfig => {
+  const existingById = new Map((existing.mcpServers || []).map((s) => [s.id, s]))
+  const providerById = new Map((existing.llmProviders || []).map((p) => [p.id, p]))
+
+  return {
+    ...incoming,
+    githubToken: mergeSecretField(incoming.githubToken, existing.githubToken),
+    llmApiKey: mergeSecretField(incoming.llmApiKey, existing.llmApiKey),
+    llmProviders: (incoming.llmProviders ?? []).map((p) => ({
+      ...p,
+      apiKey: mergeSecretField(p.apiKey, providerById.get(p.id)?.apiKey)
+    })),
+    mcpServers: (incoming.mcpServers ?? []).map((s) => ({
+      ...s,
+      env: mergeEnvMaps(s.env, existingById.get(s.id)?.env)
+    })),
+    cloud: incoming.cloud
+      ? {
+          ...incoming.cloud,
+          accessToken: mergeSecretField(
+            incoming.cloud.accessToken,
+            existing.cloud?.accessToken
+          ),
+          refreshToken: mergeSecretField(
+            incoming.cloud.refreshToken,
+            existing.cloud?.refreshToken
+          )
+        }
+      : incoming.cloud
+  }
 }
 
 export const saveAppConfig = (config: AppConfig): AppConfig => {

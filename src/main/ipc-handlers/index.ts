@@ -1,4 +1,4 @@
-import { dialog, ipcMain, type BrowserWindow } from 'electron'
+import { app, dialog, ipcMain, type BrowserWindow } from 'electron'
 import { IPC_CHANNELS } from '../../shared/ipc'
 import type {
   AppConfig,
@@ -6,7 +6,12 @@ import type {
   SendChatPayload,
   StartReviewPayload
 } from '../../shared/types'
-import { getAppConfig, saveAppConfig } from '../config/store'
+import {
+  getAppConfig,
+  mergeSecretsFromExisting,
+  redactConfigForRenderer,
+  saveAppConfig
+} from '../config/store'
 import { getLatestReviewReport, listReviewReports, getReviewReportById } from '../database/db'
 import { mcpRegistry } from '../mcp-manager/registry'
 import { reviewOrchestrator } from '../review-engine/orchestrator'
@@ -40,11 +45,15 @@ import {
   cloudUploadLatestReport
 } from '../cloud/client'
 
+const toRendererConfig = (config: AppConfig): AppConfig =>
+  redactConfigForRenderer(config)
+
 export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void => {
-  ipcMain.handle(IPC_CHANNELS.GET_CONFIG, () => getAppConfig())
+  ipcMain.handle(IPC_CHANNELS.GET_CONFIG, () => toRendererConfig(getAppConfig()))
 
   ipcMain.handle(IPC_CHANNELS.SAVE_CONFIG, (_event, config: AppConfig) => {
-    return saveAppConfig(config)
+    const merged = mergeSecretsFromExisting(config, getAppConfig())
+    return toRendererConfig(saveAppConfig(merged))
   })
 
   ipcMain.handle(IPC_CHANNELS.MCP_LIST_STATUS, async () => {
@@ -173,7 +182,7 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
       )
     })
 
-    return { count: rules.length, config: next }
+    return { count: rules.length, config: toRendererConfig(next) }
   })
 
   ipcMain.handle(IPC_CHANNELS.UPDATE_CHECK, async () => {
@@ -181,6 +190,9 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
   })
 
   ipcMain.handle(IPC_CHANNELS.REVIEW_RUN_DOC_DEMO, async () => {
+    if (app.isPackaged) {
+      throw new Error('正式安装包已禁用「需求文档联调」入口')
+    }
     const demo = loadDocDemoConfig()
     applyDocLlmConfig()
     const payloads = buildDocDemoPayloads()
@@ -213,21 +225,21 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
   ipcMain.handle(
     IPC_CHANNELS.CLOUD_LOGIN,
     async (_event, payload: { email: string; password: string; apiBase?: string }) => {
-      return cloudLogin(payload)
+      return toRendererConfig(await cloudLogin(payload))
     }
   )
 
   ipcMain.handle(
     IPC_CHANNELS.CLOUD_LOGIN_PHONE,
     async (_event, payload: { phone: string; password: string; apiBase?: string }) => {
-      return cloudLoginPhone(payload)
+      return toRendererConfig(await cloudLoginPhone(payload))
     }
   )
 
   ipcMain.handle(
     IPC_CHANNELS.CLOUD_LOGIN_SMS,
     async (_event, payload: { phone: string; code: string; apiBase?: string }) => {
-      return cloudLoginSms(payload)
+      return toRendererConfig(await cloudLoginSms(payload))
     }
   )
 
@@ -250,7 +262,7 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
         apiBase?: string
       }
     ) => {
-      return cloudRegister(payload)
+      return toRendererConfig(await cloudRegister(payload))
     }
   )
 
@@ -267,7 +279,7 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
         apiBase?: string
       }
     ) => {
-      return cloudRegisterPhone(payload)
+      return toRendererConfig(await cloudRegisterPhone(payload))
     }
   )
 
@@ -279,22 +291,31 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
     return cloudOpenAccountManage()
   })
 
-  ipcMain.handle(IPC_CHANNELS.CLOUD_REFRESH_PROFILE, async () => cloudRefreshProfile())
+  ipcMain.handle(IPC_CHANNELS.CLOUD_REFRESH_PROFILE, async () =>
+    toRendererConfig(await cloudRefreshProfile())
+  )
 
-  ipcMain.handle(IPC_CHANNELS.CLOUD_SYNC_ENDPOINTS, async () => cloudSyncEndpoints())
+  ipcMain.handle(IPC_CHANNELS.CLOUD_SYNC_ENDPOINTS, async () =>
+    toRendererConfig(await cloudSyncEndpoints())
+  )
 
-  ipcMain.handle(IPC_CHANNELS.CLOUD_LOGOUT, async () => cloudLogout())
+  ipcMain.handle(IPC_CHANNELS.CLOUD_LOGOUT, async () =>
+    toRendererConfig(await cloudLogout())
+  )
 
   ipcMain.handle(IPC_CHANNELS.CLOUD_LIST_ORGS, async () => cloudListOrgs())
 
   ipcMain.handle(
     IPC_CHANNELS.CLOUD_SET_ORG,
     async (_event, payload: { orgId: string; orgName: string }) => {
-      return cloudSetOrg(payload.orgId, payload.orgName)
+      return toRendererConfig(await cloudSetOrg(payload.orgId, payload.orgName))
     }
   )
 
-  ipcMain.handle(IPC_CHANNELS.CLOUD_PULL_CONFIG, async () => cloudPullConfig())
+  ipcMain.handle(IPC_CHANNELS.CLOUD_PULL_CONFIG, async () => {
+    const result = await cloudPullConfig()
+    return { ...result, config: toRendererConfig(result.config) }
+  })
 
   ipcMain.handle(IPC_CHANNELS.CLOUD_UPLOAD_REPORT, async () => cloudUploadLatestReport())
 
@@ -303,7 +324,7 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
   })
 
   ipcMain.handle(IPC_CHANNELS.CLOUD_ADD_MCP, async (_event, itemKey: string) => {
-    return cloudAddMcpFromCatalog(itemKey)
+    return toRendererConfig(await cloudAddMcpFromCatalog(itemKey))
   })
 
   ipcMain.handle(IPC_CHANNELS.CLOUD_REVIEW_METHODS, async (_event, q?: string) => {

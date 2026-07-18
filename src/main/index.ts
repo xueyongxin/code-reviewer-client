@@ -2,7 +2,7 @@ import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { initDatabase } from './database/db'
-import { getAppConfig } from './config/store'
+import { getAppConfig, redactConfigForRenderer } from './config/store'
 import { mcpRegistry } from './mcp-manager/registry'
 import { warmMcpRepoCache } from './review-engine/mcp-repos'
 import {
@@ -47,7 +47,11 @@ if (!gotLock) {
     error?: string
   }): void => {
     if (!mainWindow || mainWindow.isDestroyed()) return
-    mainWindow.webContents.send(IPC_CHANNELS.CLOUD_AUTH_COMPLETE, payload)
+    const safe = {
+      ...payload,
+      config: payload.config ? redactConfigForRenderer(payload.config) : undefined
+    }
+    mainWindow.webContents.send(IPC_CHANNELS.CLOUD_AUTH_COMPLETE, safe)
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
     mainWindow.focus()
