@@ -1,0 +1,117 @@
+{
+  "name": "code-reviewer-client",
+  "version": "0.1.0",
+  "description": "基于 MCP 的桌面端代码审查客户端",
+  "main": "./out/main/index.js",
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20 <21"
+  },
+  "scripts": {
+    "postinstall": "electron-rebuild -f -w better-sqlite3",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "pack": "npm run build && electron-builder --dir",
+    "pack:mac": "npm run build && electron-builder --mac --dir",
+    "pack:win-linux": "node scripts/pack-win-linux.mjs",
+    "pack:win": "node scripts/pack-win-linux.mjs",
+    "pack:linux": "node scripts/pack-win-linux.mjs",
+    "pack:all": "npm run pack:mac && npm run pack:win-linux",
+    "dist": "npm run build && electron-builder",
+    "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "verify:pack": "node scripts/verify-pack.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^11.8.1",
+    "electron-store": "^8.2.0",
+    "js-yaml": "^5.2.1"
+  },
+  "devDependencies": {
+    "@ant-design/icons": "^5.6.1",
+    "@electron/rebuild": "^3.7.2",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/js-yaml": "^4.0.9",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "antd": "^5.24.2",
+    "electron": "^28.3.3",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "monaco-editor": "^0.52.2",
+    "playwright": "^1.61.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^6.30.0",
+    "remark-gfm": "^4.0.1",
+    "typescript": "^5.7.3",
+    "vite": "^5.4.14",
+    "zustand": "^5.0.3"
+  },
+  "build": {
+    "appId": "com.codereviewer.client",
+    "productName": "Code Reviewer Client",
+    "directories": {
+      "output": "release",
+      "buildResources": "resources"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,tests,__tests__,docs}/**"
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**/*"
+    ],
+    "npmRebuild": false,
+    "buildDependenciesFromSource": false,
+    "protocols": {
+      "name": "Code Reviewer",
+      "schemes": [
+        "codereviewer"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Development"
+    }
+  }
+}

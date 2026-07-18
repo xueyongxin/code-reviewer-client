@@ -1,0 +1,30 @@
+appId: com.codereviewer.client
+productName: Code Reviewer Client
+copyright: Copyright © Code Reviewer Client
+directories:
+  output: release
+  buildResources: resources
+# 仅打包构建产物 + production dependencies（主进程运行时）
+# 前端库已在 Vite 打进 out/renderer，放在 devDependencies，不会进入安装包
+files:
+  - out/**/*
+  - package.json
+  - '!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}'
+  - '!**/node_modules/*/{test,tests,__tests__,docs}/**'
+asarUnpack:
+  - '**/node_modules/better-sqlite3/**/*'
+protocols:
+  name: Code Reviewer
+  schemes:
+    - codereviewer
+mac:
+  target:
+    - dmg
+  category: public.app-category.developer-tools
+win:
+  target:
+    - nsis
+linux:
+  target:
+    - AppImage
+publish: null

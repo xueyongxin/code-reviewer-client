@@ -1,0 +1,156 @@
+[
+  {
+    "key": "git",
+    "name": "Git",
+    "badge": "G",
+    "description": "本地 Git 仓库操作与查询",
+    "tags": ["git", "local"],
+    "verified": true,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-git"],
+    "url": "",
+    "env": {}
+  },
+  {
+    "key": "github",
+    "name": "GitHub",
+    "badge": "G",
+    "description": "通过 GitHub API 管理仓库、Issue、PR",
+    "tags": ["git", "github", "local"],
+    "verified": true,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "url": "",
+    "env": {
+      "GITHUB_PERSONAL_ACCESS_TOKEN": ""
+    }
+  },
+  {
+    "key": "gitee",
+    "name": "Gitee",
+    "badge": "码",
+    "description": "官方 Gitee MCP：仓库 / Issue / PR / 评论等 API 能力",
+    "tags": ["git", "gitee", "local", "码云"],
+    "verified": true,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@gitee/mcp-gitee@latest"],
+    "url": "",
+    "env": {
+      "GITEE_API_BASE": "https://gitee.com/api/v5",
+      "GITEE_ACCESS_TOKEN": ""
+    }
+  },
+  {
+    "key": "gitee-community",
+    "name": "Gitee (Community)",
+    "badge": "G",
+    "description": "社区 Gitee MCP：仓库、Issue、Pull Request",
+    "tags": ["git", "gitee", "码云"],
+    "verified": false,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "gitee-mcp-server"],
+    "url": "",
+    "env": {
+      "GITEE_PERSONAL_ACCESS_TOKEN": ""
+    }
+  },
+  {
+    "key": "gitlab",
+    "name": "GitLab",
+    "badge": "GL",
+    "description": "GitLab 项目管理与合并请求",
+    "tags": ["git", "gitlab"],
+    "verified": false,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-gitlab"],
+    "url": "",
+    "env": {
+      "GITLAB_PERSONAL_ACCESS_TOKEN": ""
+    }
+  },
+  {
+    "key": "filesystem",
+    "name": "Filesystem",
+    "badge": "F",
+    "description": "本地文件系统读写",
+    "tags": ["local", "fs"],
+    "verified": true,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+    "url": "",
+    "env": {}
+  },
+  {
+    "key": "fetch",
+    "name": "Fetch",
+    "badge": "W",
+    "description": "HTTP 拉取网页与接口内容",
+    "tags": ["web"],
+    "verified": true,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-fetch"],
+    "url": "",
+    "env": {}
+  },
+  {
+    "key": "memory",
+    "name": "Memory",
+    "badge": "M",
+    "description": "简单知识图谱记忆",
+    "tags": ["memory"],
+    "verified": true,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-memory"],
+    "url": "",
+    "env": {}
+  },
+  {
+    "key": "sqlite",
+    "name": "SQLite",
+    "badge": "S",
+    "description": "查询本地 SQLite 数据库",
+    "tags": ["db", "sqlite"],
+    "verified": true,
+    "transport": "stdio",
+    "command": "uvx",
+    "args": ["mcp-server-sqlite", "--db-path", "./data.db"],
+    "url": "",
+    "env": {}
+  },
+  {
+    "key": "brave",
+    "name": "Brave Search",
+    "badge": "B",
+    "description": "Brave 搜索 API",
+    "tags": ["search", "web"],
+    "verified": false,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+    "url": "",
+    "env": {
+      "BRAVE_API_KEY": ""
+    }
+  },
+  {
+    "key": "everything",
+    "name": "Everything",
+    "badge": "E",
+    "description": "MCP 示例/调试用 Server",
+    "tags": ["demo"],
+    "verified": false,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-everything"],
+    "url": "",
+    "env": {}
+  }
+]

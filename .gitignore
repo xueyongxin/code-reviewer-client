@@ -1,0 +1,17 @@
+node_modules
+out
+dist
+release
+test-artifacts
+tmp-review-runs
+tmp-*.png
+sider-foot-*.png
+*.local
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.tsbuildinfo

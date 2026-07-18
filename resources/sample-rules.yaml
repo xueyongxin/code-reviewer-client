@@ -1,0 +1,12 @@
+rules:
+  - id: no-fix-me
+    name: 禁止 fixme 标记
+    severity: warning
+    pattern: "(?i)\\bfixme\\b"
+    message: "发现 FIXME，请确认是否已处理"
+    extensions: [".ts", ".tsx", ".js", ".jsx", ".md"]
+  - id: no-hardcoded-localhost-port
+    name: 避免硬编码本地端口
+    severity: info
+    pattern: "localhost:\\d{2,5}"
+    message: "硬编码 localhost 端口，建议改为配置项"
