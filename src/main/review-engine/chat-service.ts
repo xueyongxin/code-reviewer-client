@@ -11,30 +11,34 @@ import {
   appendChatMessage,
   createChatSession,
   deleteChatSession,
+  deleteTrailingAssistantMessages,
   getChatSessionById,
   getReviewReportById,
   listChatSessions,
   updateChatSessionMeta
 } from '../database/db'
+import { splitThinkingContent } from '../../shared/chat-thinking'
 import { runChatCompletion } from './llm-chat'
 
 const buildSystemPrompt = (report: ReviewReport | null): string => {
   const base = [
-    '你是 Reviewer 桌面端的代码审查助手。',
+    '你是 Reviewer 桌面端的代码审查助手，可称呼自己为「小智」。',
     '用简洁中文回答，聚焦代码质量、安全、可维护性与修复建议。',
     '如果用户问题与当前审查报告相关，请结合报告中的问题与文件内容作答。',
-    '不确定时说明假设，不要编造不存在的文件或行号。'
+    '不确定时说明假设，不要编造不存在的文件或行号。',
+    '回答前先在 <think>...</think> 中写出简要思考过程（分析步骤与结论依据），标签外只输出最终回复。'
   ]
 
   if (!report) {
     return base.join('\n')
   }
 
-  const issueLines = (report.issues ?? [])
+  const errors = (report.issues ?? []).filter((issue) => issue.severity === 'error')
+  const issueLines = errors
     .slice(0, 30)
     .map(
       (issue, index) =>
-        `${index + 1}. [${issue.severity}] ${issue.filePath}:${issue.line} — ${issue.message}`
+        `${index + 1}. [error] ${issue.filePath}:${issue.line} — ${issue.message}`
     )
     .join('\n')
 
@@ -53,10 +57,10 @@ const buildSystemPrompt = (report: ReviewReport | null): string => {
     `- 仓库：${report.repoUrl}`,
     `- 状态：${report.status}`,
     `- Commit：${report.commitSha || '未知'}`,
-    `- 问题数：${report.issues?.length ?? 0}`,
+    `- 错误数：${errors.length}`,
     '',
     '问题摘要：',
-    issueLines || '（暂无问题）',
+    issueLines || '（暂无错误）',
     '',
     '相关文件片段：',
     fileLines || '（无文件内容）'
@@ -69,6 +73,22 @@ const loadCommandsForExpand = async () => {
     return mergeChatCommands(remote)
   } catch {
     return mergeChatCommands([])
+  }
+}
+
+const isAbortError = (error: unknown, signal?: AbortSignal): boolean => {
+  if (signal?.aborted) return true
+  if (!(error instanceof Error)) return false
+  return error.name === 'AbortError' || /aborted|取消|暂停/i.test(error.message)
+}
+
+/** 当前进行中的对话生成（带 token，避免取消误伤下一轮） */
+let activeGeneration: { controller: AbortController; token: string } | null = null
+
+export class GenerationCancelledError extends Error {
+  constructor() {
+    super('已停止生成')
+    this.name = 'GenerationCancelledError'
   }
 }
 
@@ -89,6 +109,11 @@ export const chatService = {
     deleteChatSession(sessionId)
   },
 
+  /** 暂停当前正在进行的模型生成 */
+  cancelGeneration: (): void => {
+    activeGeneration?.controller.abort()
+  },
+
   sendMessage: async (payload: SendChatPayload): Promise<ChatSession> => {
     const content = payload.content?.trim()
     if (!content) {
@@ -96,7 +121,14 @@ export const chatService = {
     }
 
     let session = payload.sessionId ? getChatSessionById(payload.sessionId) : null
-    if (!session) {
+
+    if (payload.regenerate) {
+      if (!session) throw new Error('重新生成需要有效会话')
+      deleteTrailingAssistantMessages(session.id)
+      session = getChatSessionById(session.id)!
+      const lastUser = [...session.messages].reverse().find((m) => m.role === 'user')
+      if (!lastUser) throw new Error('没有可重新生成的用户消息')
+    } else if (!session) {
       session = createChatSession({
         id: randomUUID(),
         title: titleFromChatContent(content),
@@ -111,17 +143,19 @@ export const chatService = {
     const commands = await loadCommandsForExpand()
     const expanded = expandSlashForLlm(content, commands, { reportId: reportIdForExpand })
 
-    const userMessage: ChatMessage = {
-      id: randomUUID(),
-      sessionId: session.id,
-      role: 'user',
-      content: expanded.display,
-      createdAt: new Date().toISOString()
-    }
-    appendChatMessage(userMessage)
+    if (!payload.regenerate) {
+      const userMessage: ChatMessage = {
+        id: randomUUID(),
+        sessionId: session.id,
+        role: 'user',
+        content: expanded.display,
+        createdAt: new Date().toISOString()
+      }
+      appendChatMessage(userMessage)
 
-    if (session.messages.length === 0 && session.title === '新对话') {
-      updateChatSessionMeta(session.id, { title: titleFromChatContent(expanded.display) })
+      if (session.messages.length === 0 && session.title === '新对话') {
+        updateChatSessionMeta(session.id, { title: titleFromChatContent(expanded.display) })
+      }
     }
 
     const refreshed = getChatSessionById(session.id)!
@@ -142,17 +176,29 @@ export const chatService = {
       return { role: m.role, content: again.llm }
     })
 
+    // 新请求覆盖前先中止旧轮，防止 controller 泄漏
+    activeGeneration?.controller.abort()
+    const abort = new AbortController()
+    const generationToken = randomUUID()
+    activeGeneration = { controller: abort, token: generationToken }
     try {
-      const result = await runChatCompletion(config, system, history)
+      const result = await runChatCompletion(config, system, history, abort.signal)
+      const split = splitThinkingContent(result.content)
+      // 仅保留模型真实返回的思考内容，不伪造占位文案
+      const thinking = result.thinking?.trim() || split.thinking || undefined
       const assistantMessage: ChatMessage = {
         id: randomUUID(),
         sessionId: session.id,
         role: 'assistant',
-        content: result.content,
+        content: split.content || result.content,
+        ...(thinking ? { thinking } : {}),
         createdAt: new Date().toISOString()
       }
       appendChatMessage(assistantMessage)
     } catch (error) {
+      if (isAbortError(error, abort.signal)) {
+        throw new GenerationCancelledError()
+      }
       const assistantMessage: ChatMessage = {
         id: randomUUID(),
         sessionId: session.id,
@@ -161,6 +207,10 @@ export const chatService = {
         createdAt: new Date().toISOString()
       }
       appendChatMessage(assistantMessage)
+    } finally {
+      if (activeGeneration?.token === generationToken) {
+        activeGeneration = null
+      }
     }
 
     return getChatSessionById(session.id)!

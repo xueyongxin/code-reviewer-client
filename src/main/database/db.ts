@@ -75,7 +75,22 @@ const ensureSchema = (database: Database.Database): void => {
       payload TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS ext_app_repo_cache (
+      id TEXT PRIMARY KEY CHECK (id = 'default'),
+      fingerprint TEXT NOT NULL,
+      repos_json TEXT NOT NULL,
+      errors_json TEXT NOT NULL DEFAULT '[]',
+      fetched_at INTEGER NOT NULL
+    );
   `)
+
+  const chatCols = database
+    .prepare(`PRAGMA table_info(chat_messages)`)
+    .all() as Array<{ name: string }>
+  if (!chatCols.some((c) => c.name === 'thinking')) {
+    database.exec(`ALTER TABLE chat_messages ADD COLUMN thinking TEXT`)
+  }
 }
 
 /** 将旧版 JSON 历史一次性迁移进 SQLite */
@@ -231,6 +246,13 @@ export const getReviewReportById = (reportId: string): ReviewReport | null => {
   return row ? rowToReport(row) : null
 }
 
+export const deleteReviewReport = (reportId: string): boolean => {
+  const result = getDb()
+    .prepare(`DELETE FROM review_reports WHERE id = ?`)
+    .run(reportId)
+  return result.changes > 0
+}
+
 export const findCachedReportByCommitSha = (commitSha: string): ReviewReport | null => {
   if (!commitSha) return null
   const row = getDb()
@@ -330,7 +352,7 @@ export const getChatSessionById = (sessionId: string): ChatSession | null => {
   const messages = getDb()
     .prepare(
       `
-      SELECT id, session_id, role, content, created_at
+      SELECT id, session_id, role, content, thinking, created_at
       FROM chat_messages
       WHERE session_id = ?
       ORDER BY created_at ASC
@@ -341,6 +363,7 @@ export const getChatSessionById = (sessionId: string): ChatSession | null => {
     session_id: string
     role: string
     content: string
+    thinking: string | null
     created_at: string
   }>
 
@@ -351,6 +374,7 @@ export const getChatSessionById = (sessionId: string): ChatSession | null => {
       sessionId: m.session_id,
       role: m.role as ChatMessage['role'],
       content: m.content,
+      thinking: m.thinking?.trim() || undefined,
       createdAt: m.created_at
     }))
   }
@@ -415,8 +439,8 @@ export const appendChatMessage = (message: ChatMessage): void => {
   database
     .prepare(
       `
-      INSERT INTO chat_messages (id, session_id, role, content, created_at)
-      VALUES (@id, @session_id, @role, @content, @created_at)
+      INSERT INTO chat_messages (id, session_id, role, content, thinking, created_at)
+      VALUES (@id, @session_id, @role, @content, @thinking, @created_at)
     `
     )
     .run({
@@ -424,11 +448,35 @@ export const appendChatMessage = (message: ChatMessage): void => {
       session_id: message.sessionId,
       role: message.role,
       content: message.content,
+      thinking: message.thinking?.trim() || null,
       created_at: message.createdAt
     })
   database
     .prepare(`UPDATE chat_sessions SET updated_at = ? WHERE id = ?`)
     .run(message.createdAt, message.sessionId)
+}
+
+/** 删除会话末尾连续的 assistant 消息（供重新生成） */
+export const deleteTrailingAssistantMessages = (sessionId: string): number => {
+  const session = getChatSessionById(sessionId)
+  if (!session?.messages.length) return 0
+  const ids: string[] = []
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const msg = session.messages[i]
+    if (msg.role !== 'assistant') break
+    ids.push(msg.id)
+  }
+  if (!ids.length) return 0
+  const database = getDb()
+  const del = database.prepare(`DELETE FROM chat_messages WHERE id = ?`)
+  const tx = database.transaction((list: string[]) => {
+    for (const id of list) del.run(id)
+    database
+      .prepare(`UPDATE chat_sessions SET updated_at = ? WHERE id = ?`)
+      .run(new Date().toISOString(), sessionId)
+  })
+  tx(ids)
+  return ids.length
 }
 
 export const deleteChatSession = (sessionId: string): void => {
@@ -467,6 +515,72 @@ export const saveAppConfigPayload = (config: AppConfig): void => {
       payload: JSON.stringify(config),
       updated_at: new Date().toISOString()
     })
+}
+
+export type ExtAppRepoCacheRow = {
+  fingerprint: string
+  repos: unknown[]
+  errors: string[]
+  fetchedAt: number
+}
+
+export const getExtAppRepoCache = (): ExtAppRepoCacheRow | null => {
+  const row = getDb()
+    .prepare(
+      `SELECT fingerprint, repos_json, errors_json, fetched_at
+       FROM ext_app_repo_cache WHERE id = 'default'`
+    )
+    .get() as
+    | {
+        fingerprint: string
+        repos_json: string
+        errors_json: string
+        fetched_at: number
+      }
+    | undefined
+  if (!row) return null
+  try {
+    const repos = JSON.parse(row.repos_json) as unknown[]
+    const errors = JSON.parse(row.errors_json || '[]') as string[]
+    if (!Array.isArray(repos)) return null
+    return {
+      fingerprint: row.fingerprint,
+      repos,
+      errors: Array.isArray(errors) ? errors : [],
+      fetchedAt: Number(row.fetched_at) || 0
+    }
+  } catch {
+    return null
+  }
+}
+
+export const setExtAppRepoCache = (input: {
+  fingerprint: string
+  repos: unknown[]
+  errors: string[]
+}): void => {
+  getDb()
+    .prepare(
+      `
+      INSERT INTO ext_app_repo_cache (id, fingerprint, repos_json, errors_json, fetched_at)
+      VALUES ('default', @fingerprint, @repos_json, @errors_json, @fetched_at)
+      ON CONFLICT(id) DO UPDATE SET
+        fingerprint = excluded.fingerprint,
+        repos_json = excluded.repos_json,
+        errors_json = excluded.errors_json,
+        fetched_at = excluded.fetched_at
+    `
+    )
+    .run({
+      fingerprint: input.fingerprint,
+      repos_json: JSON.stringify(input.repos),
+      errors_json: JSON.stringify(input.errors),
+      fetched_at: Date.now()
+    })
+}
+
+export const clearExtAppRepoCache = (): void => {
+  getDb().prepare(`DELETE FROM ext_app_repo_cache`).run()
 }
 
 

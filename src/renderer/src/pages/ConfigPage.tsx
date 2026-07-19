@@ -6,6 +6,7 @@ import {
   Dropdown,
   Form,
   Input,
+  InputNumber,
   Modal,
   Select,
   Switch,
@@ -20,6 +21,7 @@ import {
   ExclamationCircleOutlined,
   ExportOutlined,
   InfoCircleOutlined,
+  LinkOutlined,
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -32,17 +34,31 @@ import { useAppStore } from '../store/useAppStore'
 import { useAppearance } from '../prefs/AppearanceProvider'
 import type { AppLocale, ThemeMode } from '../prefs/appearance'
 import ModelManagePanel from './ModelManagePanel'
+import {
+  DEFAULT_BATCH_REVIEW_CONCURRENCY,
+  MAX_BATCH_REVIEW_CONCURRENCY,
+  MIN_BATCH_REVIEW_CONCURRENCY,
+  clampBatchReviewConcurrency
+} from '../../../shared/batch-concurrency'
 import type {
   AppConfig,
   McpMarketplaceItem,
   McpServerConfig
 } from '../../../shared/types'
 import {
+  CODE_REPO_PROVIDERS_FALLBACK,
+  mapCatalogToProviderDef,
+  type CodeRepoProviderDef,
+  type CodeRepoProviderId
+} from '../../../shared/code-repo-providers'
+import { CODE_REPO_LOGOS } from '../assets/code-repos'
+import {
   DEFAULT_MCP_JSON,
   buildMcpServersJson,
   parseMcpServersJson,
   titleFromMcpJson
 } from '../../../shared/mcp-json'
+import { SECRET_CLEAR } from '../../../shared/secret-tokens'
 import type { MessageKey } from '../i18n/messages'
 
 const RULE_OPTIONS = [
@@ -60,7 +76,13 @@ const RULE_OPTIONS = [
   { value: 'max-line-length', label: '单行过长' }
 ]
 
-export type SettingsSection = 'cloud' | 'general' | 'mcp' | 'llm' | 'rules'
+export type SettingsSection =
+  | 'cloud'
+  | 'general'
+  | 'externalApps'
+  | 'mcp'
+  | 'llm'
+  | 'rules'
 
 const SECTIONS: Array<{
   key: SettingsSection
@@ -71,10 +93,52 @@ const SECTIONS: Array<{
 }> = [
   { key: 'cloud', labelKey: 'settings.account', icon: <UserOutlined />, group: 1 },
   { key: 'general', labelKey: 'settings.general', icon: <SettingOutlined />, group: 1 },
+  {
+    key: 'externalApps',
+    labelKey: 'settings.externalApps',
+    icon: <LinkOutlined />,
+    group: 2
+  },
   { key: 'mcp', labelKey: 'settings.mcp', icon: <CloudServerOutlined />, group: 2 },
   { key: 'llm', labelKey: 'settings.models', icon: <ApiOutlined />, group: 2 },
   { key: 'rules', labelKey: 'settings.rules', icon: <CodeOutlined />, group: 2 }
 ]
+
+const ProviderMark = ({
+  id,
+  name,
+  logoUrl
+}: {
+  id: CodeRepoProviderId
+  name: string
+  logoUrl?: string
+}): JSX.Element => {
+  const custom = logoUrl?.trim() || ''
+  const builtin = CODE_REPO_LOGOS[id] || CODE_REPO_LOGOS.other
+  const [src, setSrc] = useState(custom || builtin)
+
+  useEffect(() => {
+    setSrc(custom || builtin)
+  }, [custom, builtin])
+
+  if (!src) {
+    return <span className="ext-apps-letter">{name.slice(0, 1).toUpperCase()}</span>
+  }
+  return (
+    <img
+      className="ext-apps-logo"
+      src={src}
+      alt=""
+      width={22}
+      height={22}
+      draggable={false}
+      onError={() => {
+        // 自定义 Logo 失效时回退内置默认图标
+        if (custom && src === custom && builtin) setSrc(builtin)
+      }}
+    />
+  )
+}
 
 type ConfigPageProps = {
   open: boolean
@@ -209,6 +273,14 @@ const ConfigPage = ({ open, onClose, initialSection = 'cloud' }: ConfigPageProps
   const [mcpJson, setMcpJson] = useState(DEFAULT_MCP_JSON)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [connectingId, setConnectingId] = useState<string | null>(null)
+  const [extAppModal, setExtAppModal] = useState<CodeRepoProviderId | null>(null)
+  const [extAppToken, setExtAppToken] = useState('')
+  const [extAppBaseUrl, setExtAppBaseUrl] = useState('')
+  const [extAppBusy, setExtAppBusy] = useState(false)
+  const [codeRepoProviders, setCodeRepoProviders] = useState<
+    CodeRepoProviderDef[]
+  >(CODE_REPO_PROVIDERS_FALLBACK)
+  const [codeRepoLoading, setCodeRepoLoading] = useState(false)
 
   const [rulesForm] = Form.useForm()
 
@@ -232,6 +304,26 @@ const ConfigPage = ({ open, onClose, initialSection = 'cloud' }: ConfigPageProps
       }
     })()
   }, [hasCloudSession, saveConfig])
+
+  useEffect(() => {
+    if (section !== 'externalApps' || !open) return
+    setCodeRepoLoading(true)
+    void (async () => {
+      try {
+        const list = await window.electronAPI.cloudCodeRepoCatalog()
+        if (list?.length) {
+          setCodeRepoProviders(list.map(mapCatalogToProviderDef))
+        } else {
+          setCodeRepoProviders([])
+        }
+      } catch {
+        // 服务不可用时用本地兜底，避免设置页空白
+        setCodeRepoProviders(CODE_REPO_PROVIDERS_FALLBACK)
+      } finally {
+        setCodeRepoLoading(false)
+      }
+    })()
+  }, [section, open])
 
   useEffect(() => {
     return window.electronAPI.onCloudAuthComplete((payload) => {
@@ -927,6 +1019,35 @@ const ConfigPage = ({ open, onClose, initialSection = 'cloud' }: ConfigPageProps
                 <div className="account-divider" />
                 <div className="general-row">
                   <div className="general-row-copy">
+                    <div className="general-row-title">
+                      {t('general.batchConcurrency')}
+                    </div>
+                    <div className="general-row-desc">
+                      {t('general.batchConcurrencyDesc')}
+                    </div>
+                  </div>
+                  <InputNumber
+                    className="general-select"
+                    min={MIN_BATCH_REVIEW_CONCURRENCY}
+                    max={MAX_BATCH_REVIEW_CONCURRENCY}
+                    step={1}
+                    value={clampBatchReviewConcurrency(
+                      config.batchReviewConcurrency ??
+                        DEFAULT_BATCH_REVIEW_CONCURRENCY
+                    )}
+                    onChange={(v) => {
+                      void saveConfig({
+                        ...config,
+                        batchReviewConcurrency: clampBatchReviewConcurrency(
+                          v ?? DEFAULT_BATCH_REVIEW_CONCURRENCY
+                        )
+                      })
+                    }}
+                  />
+                </div>
+                <div className="account-divider" />
+                <div className="general-row">
+                  <div className="general-row-copy">
                     <div className="general-row-title">启用 LLM 审查</div>
                     <div className="general-row-desc">关闭后仅使用静态规则审查</div>
                   </div>
@@ -939,6 +1060,152 @@ const ConfigPage = ({ open, onClose, initialSection = 'cloud' }: ConfigPageProps
                 </div>
               </div>
             </section>
+          </div>
+        )}
+
+        {section === 'externalApps' && (
+          <div className="settings-main-inner ext-apps-panel">
+            <h1 className="settings-h1">{sectionTitle}</h1>
+            <p className="ext-apps-lead">{t('externalApps.lead')}</p>
+            <div className="ext-apps-card">
+              {codeRepoLoading ? (
+                <div className="ext-apps-empty">正在加载平台列表…</div>
+              ) : null}
+              {!codeRepoLoading && codeRepoProviders.length === 0 ? (
+                <div className="ext-apps-empty">
+                  暂无可用平台，请在管理端配置中心开启「代码仓库」目录项
+                </div>
+              ) : null}
+              {codeRepoProviders.map((provider, index) => {
+                const conn = config.externalApps?.providers?.[provider.id]
+                const connected = Boolean(
+                  conn?.connected ||
+                    (provider.id === 'github' && config.githubToken?.trim())
+                )
+                return (
+                  <div key={provider.id}>
+                    {index > 0 ? <div className="ext-apps-divider" /> : null}
+                    <div className="ext-apps-row">
+                      <div className={`ext-apps-icon is-${provider.id}`}>
+                        <ProviderMark
+                          id={provider.id}
+                          name={provider.name}
+                          logoUrl={provider.logoUrl}
+                        />
+                      </div>
+                      <div className="ext-apps-copy">
+                        <div className="ext-apps-name">
+                          {provider.name}
+                          {connected ? (
+                            <span className="ext-apps-badge">
+                              {t('externalApps.connected')}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="ext-apps-desc">
+                          {connected
+                            ? conn?.baseUrl ||
+                              conn?.accountLabel ||
+                              provider.description
+                            : provider.description}
+                        </div>
+                      </div>
+                      <div className="ext-apps-actions">
+                        {connected ? (
+                          <>
+                            <button
+                              type="button"
+                              className="ext-apps-btn is-ghost"
+                              disabled={extAppBusy}
+                              onClick={() => {
+                                void (async () => {
+                                  setExtAppBusy(true)
+                                  try {
+                                    const providers = {
+                                      ...(config.externalApps?.providers ?? {})
+                                    }
+                                    delete providers[provider.id]
+                                    await saveConfig({
+                                      ...config,
+                                      githubToken:
+                                        provider.id === 'github'
+                                          ? SECRET_CLEAR
+                                          : config.githubToken,
+                                      externalApps: { providers }
+                                    })
+                                    message.success(
+                                      t('externalApps.disconnectOk')
+                                    )
+                                  } catch (e) {
+                                    message.error(
+                                      e instanceof Error ? e.message : '操作失败'
+                                    )
+                                  } finally {
+                                    setExtAppBusy(false)
+                                  }
+                                })()
+                              }}
+                            >
+                              {t('externalApps.disconnect')}
+                            </button>
+                            <button
+                              type="button"
+                              className="ext-apps-btn is-ghost"
+                              disabled={extAppBusy}
+                              onClick={() => {
+                                void (async () => {
+                                  setExtAppBusy(true)
+                                  try {
+                                    const secret =
+                                      await window.electronAPI.getExternalAppSecret(
+                                        provider.id
+                                      )
+                                    setExtAppToken(secret.accessToken || '')
+                                    setExtAppBaseUrl(
+                                      secret.baseUrl ||
+                                        conn?.baseUrl ||
+                                        provider.baseUrlPlaceholder ||
+                                        ''
+                                    )
+                                    setExtAppModal(provider.id)
+                                  } catch (e) {
+                                    message.warning(
+                                      e instanceof Error
+                                        ? e.message
+                                        : '暂时无法读取已保存的令牌'
+                                    )
+                                  } finally {
+                                    setExtAppBusy(false)
+                                  }
+                                })()
+                              }}
+                            >
+                              {t('externalApps.edit')}
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            className="ext-apps-btn"
+                            disabled={extAppBusy}
+                            onClick={() => {
+                              setExtAppToken('')
+                              setExtAppBaseUrl(
+                                provider.baseUrlPlaceholder || ''
+                              )
+                              setExtAppModal(provider.id)
+                            }}
+                          >
+                            {t('externalApps.connect')}
+                            <ExportOutlined />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
 
@@ -1283,6 +1550,131 @@ const ConfigPage = ({ open, onClose, initialSection = 'cloud' }: ConfigPageProps
         )}
           </main>
         </div>
+      </Modal>
+
+      <Modal
+        open={Boolean(extAppModal)}
+        title={
+          codeRepoProviders.find((p) => p.id === extAppModal)?.name ||
+          t('settings.externalApps')
+        }
+        onCancel={() => {
+          setExtAppModal(null)
+          setExtAppToken('')
+          setExtAppBaseUrl('')
+        }}
+        okText={
+          extAppModal &&
+          (config?.externalApps?.providers?.[extAppModal]?.connected ||
+            (extAppModal === 'github' && config?.githubToken?.trim()))
+            ? t('externalApps.save')
+            : t('externalApps.connect')
+        }
+        cancelText="取消"
+        confirmLoading={extAppBusy}
+        onOk={() => {
+          void (async () => {
+            const provider = codeRepoProviders.find((p) => p.id === extAppModal)
+            if (!provider || !config || !extAppModal) return
+            const editing = Boolean(
+              config.externalApps?.providers?.[provider.id]?.connected ||
+                (provider.id === 'github' && config.githubToken?.trim())
+            )
+            const token = extAppToken.trim()
+            if (!token && !editing) {
+              message.warning(t('externalApps.tokenRequired'))
+              return
+            }
+            const baseUrl = extAppBaseUrl.trim().replace(/\/$/, '')
+            if (provider.needsBaseUrl && !baseUrl) {
+              message.warning(t('externalApps.baseUrlRequired'))
+              return
+            }
+            setExtAppBusy(true)
+            const hideLoading = message.loading(t('externalApps.verifying'), 0)
+            try {
+              const verified = await window.electronAPI.verifyExternalApp({
+                providerId: provider.id,
+                accessToken: token || undefined,
+                baseUrl: baseUrl || undefined
+              })
+              if (!verified.ok) {
+                message.warning(
+                  verified.message || t('externalApps.verifyFailed')
+                )
+                return
+              }
+              const prev = config.externalApps?.providers?.[provider.id]
+              const now = new Date().toISOString()
+              const providers = {
+                ...(config.externalApps?.providers ?? {}),
+                [provider.id]: {
+                  connected: true,
+                  accountLabel: verified.accountLabel || prev?.accountLabel,
+                  // 编辑时留空 = 保留原令牌（merge 空串不覆盖）
+                  accessToken: token || prev?.accessToken || '',
+                  baseUrl: baseUrl || undefined,
+                  connectedAt: prev?.connectedAt || now
+                }
+              }
+              await saveConfig({
+                ...config,
+                githubToken:
+                  provider.id === 'github'
+                    ? token || config.githubToken
+                    : config.githubToken,
+                externalApps: { providers }
+              })
+              message.success(
+                editing ? t('externalApps.saveOk') : t('externalApps.connectOk')
+              )
+              setExtAppModal(null)
+              setExtAppToken('')
+              setExtAppBaseUrl('')
+            } catch (e) {
+              message.warning(
+                e instanceof Error
+                  ? e.message
+                  : '暂时无法完成连接，请稍后重试'
+              )
+            } finally {
+              hideLoading()
+              setExtAppBusy(false)
+            }
+          })()
+        }}
+        destroyOnClose
+        centered
+      >
+        <p className="ext-apps-modal-hint">{t('externalApps.tokenHint')}</p>
+        {codeRepoProviders.find((p) => p.id === extAppModal)?.needsBaseUrl ? (
+          <Input
+            className="ext-apps-modal-input"
+            value={extAppBaseUrl}
+            onChange={(e) => setExtAppBaseUrl(e.target.value)}
+            placeholder={
+              codeRepoProviders.find((p) => p.id === extAppModal)
+                ?.baseUrlPlaceholder || t('externalApps.baseUrlLabel')
+            }
+            style={{ marginBottom: 10 }}
+          />
+        ) : null}
+        <Input.Password
+          value={extAppToken}
+          onChange={(e) => setExtAppToken(e.target.value)}
+          placeholder={t('externalApps.tokenLabel')}
+          autoFocus
+        />
+        {codeRepoProviders.find((p) => p.id === extAppModal)?.tokenUrl ? (
+          <a
+            className="ext-apps-modal-link"
+            href={codeRepoProviders.find((p) => p.id === extAppModal)?.tokenUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {t('externalApps.openCreateToken')} <ExportOutlined />
+          </a>
+        ) : null}
       </Modal>
 
       <Modal

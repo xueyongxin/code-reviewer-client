@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { message } from 'antd'
 import type {
   AppConfig,
   ChatSession,
@@ -31,7 +32,7 @@ interface AppState {
   connectMcp: (serverId: string) => Promise<void>
   disconnectMcp: (serverId: string) => Promise<void>
   startReview: (payload: StartReviewPayload) => Promise<void>
-  startBatchReview: (payloads: StartReviewPayload[]) => Promise<void>
+  startBatchReview: (payloads: StartReviewPayload[]) => Promise<ReviewReport[]>
   cancelReview: () => Promise<void>
   postPrComments: (payload: PostPrCommentsPayload) => Promise<{
     posted: number
@@ -46,6 +47,7 @@ interface AppState {
     reports: ReviewReport[]
   }>
   loadReport: (reportId: string) => Promise<void>
+  deleteReport: (reportId: string) => Promise<void>
   subscribeProgress: () => () => void
   refreshChatSessions: (preferId?: string | null) => Promise<void>
   setActiveChatId: (id: string | null) => void
@@ -88,7 +90,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
 
-    set({ config, currentReport, history, mcpStatus })
+    set({
+      config,
+      currentReport,
+      history,
+      mcpStatus,
+      // 避免上次异常退出后 loading 一直为 true，导致列表运行按钮点不了
+      loading: currentReport?.status === 'running',
+      batchRunning: false
+    })
 
     // 启动时主进程会后台自动重连 enabled MCP，短暂轮询以刷新 UI
     const enabledCount = (config.mcpServers || []).filter((s) => s.enabled).length
@@ -127,9 +137,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   startReview: async (payload) => {
     set({ loading: true })
     try {
+      // 主进程在首帧进度时即返回（审查仍在后台继续）
       const report = await window.electronAPI.startReview(payload)
       const history = await window.electronAPI.getReportHistory()
-      set({ currentReport: report, history, loading: false })
+      set({
+        currentReport: report,
+        history,
+        loading: report.status === 'running'
+      })
     } catch (error) {
       set({ loading: false })
       throw error
@@ -147,6 +162,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         batchRunning: false,
         loading: false
       })
+      return reports
     } catch (error) {
       set({ batchRunning: false, loading: false })
       throw error
@@ -200,10 +216,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (report) set({ currentReport: report })
   },
 
+  deleteReport: async (reportId) => {
+    await window.electronAPI.deleteReport(reportId)
+    const history = await window.electronAPI.getReportHistory()
+    const latest = await window.electronAPI.getLatestReport()
+    const { currentReport } = get()
+    set({
+      history,
+      currentReport:
+        currentReport?.id === reportId ? latest : currentReport ?? latest
+    })
+  },
+
   subscribeProgress: () => {
     const api = window.electronAPI
     if (!api?.onReviewProgress) return () => undefined
+    let lastStatus: ReviewReport['status'] | null = null
     return api.onReviewProgress((report) => {
+      const prev = lastStatus
+      lastStatus = report.status
       set((state) => {
         const next: Partial<AppState> = {
           currentReport: report,
@@ -215,6 +246,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         return next
       })
+      if (prev === 'running' && report.status === 'completed') {
+        message.success('审查已完成')
+      } else if (prev === 'running' && report.status === 'failed') {
+        message.error(report.error || '审查失败')
+      }
     })
   },
 
@@ -230,13 +266,21 @@ export const useAppStore = create<AppState>((set, get) => ({
       updatedAt: s.updatedAt
     }))
     const current = get().activeChatId
-    const nextId =
-      preferId !== undefined
-        ? preferId
-        : current && summaries.some((s) => s.id === current)
-          ? current
-          : (summaries[0]?.id ?? null)
-    const bump = preferId !== undefined && preferId !== current
+    // 当前选中仍有效时绝不强切，避免发送完成把用户从其他会话拽回
+    let nextId: string | null
+    let bump = false
+    if (current && summaries.some((s) => s.id === current)) {
+      nextId = current
+    } else if (
+      preferId != null &&
+      summaries.some((s) => s.id === preferId)
+    ) {
+      nextId = preferId
+      bump = preferId !== current
+    } else {
+      nextId = summaries[0]?.id ?? null
+      bump = nextId !== current
+    }
     set((state) => ({
       chatSessions: summaries,
       activeChatId: nextId,

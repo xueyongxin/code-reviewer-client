@@ -3,19 +3,24 @@ import { Dropdown, Modal, Select, message } from 'antd'
 import {
   AppstoreOutlined,
   ArrowUpOutlined,
+  CheckOutlined,
   CommentOutlined,
   CopyOutlined,
   DeleteOutlined,
   DislikeOutlined,
+  DownOutlined,
   EllipsisOutlined,
   LikeOutlined,
   PaperClipOutlined,
   PlusOutlined,
   ReloadOutlined,
-  ThunderboltOutlined
+  SettingOutlined,
+  UpOutlined
 } from '@ant-design/icons'
+import brandMark from '../assets/brand-mark.svg'
 import { useAppStore } from '../store/useAppStore'
 import MarkdownMessage from '../components/MarkdownMessage'
+import type { SettingsSection } from './ConfigPage'
 import type { ChatMessage, ChatSession } from '../../../shared/types'
 import {
   LOCAL_COMMAND_KEYS,
@@ -26,45 +31,9 @@ import {
   parseSlashInput,
   type ChatCommandDef
 } from '../../../shared/chat-commands'
-
-const shortRepo = (url: string): string => {
-  try {
-    const cleaned = url.replace(/\.git$/, '')
-    const parts = cleaned.split('/').filter(Boolean)
-    return parts.slice(-2).join('/') || url
-  } catch {
-    return url
-  }
-}
-
-const formatChatTime = (iso?: string): string => {
-  if (!iso) return ''
-  try {
-    const d = new Date(iso)
-    const now = new Date()
-    const sameDay =
-      d.getFullYear() === now.getFullYear() &&
-      d.getMonth() === now.getMonth() &&
-      d.getDate() === now.getDate()
-    const yesterday = new Date(now)
-    yesterday.setDate(now.getDate() - 1)
-    const isYesterday =
-      d.getFullYear() === yesterday.getFullYear() &&
-      d.getMonth() === yesterday.getMonth() &&
-      d.getDate() === yesterday.getDate()
-    const hm = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-    if (sameDay) return hm
-    if (isYesterday) return `昨天 ${hm}`
-    return d.toLocaleString('zh-CN', {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    })
-  } catch {
-    return ''
-  }
-}
+import { formatDateTime } from '../../../shared/datetime'
+import { shortRepo } from '../../../shared/repo-path'
+import { copyText } from '../lib/clipboard'
 
 const estimateDurationLabel = (messages: ChatMessage[]): string | null => {
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant')
@@ -80,7 +49,61 @@ const estimateDurationLabel = (messages: ChatMessage[]): string | null => {
   return `任务耗时 ${sec}s`
 }
 
-const ChatPage = (): JSX.Element => {
+const ThinkingBlock = ({
+  thinking,
+  loading,
+  onStop
+}: {
+  thinking?: string
+  loading?: boolean
+  onStop?: () => void
+}): JSX.Element | null => {
+  const [open, setOpen] = useState(false)
+  if (loading) {
+    return (
+      <div className="chat-thinking">
+        <div className="chat-thinking-loading">
+          小智在努力思考中
+          <span className="chat-thinking-dots" aria-hidden>
+            <span>.</span>
+            <span>.</span>
+            <span>.</span>
+          </span>
+          <UpOutlined className="chat-thinking-caret" />
+        </div>
+        {onStop ? (
+          <div className="chat-thinking-actions">
+            <button type="button" className="chat-stop-manual" onClick={onStop}>
+              <span className="chat-stop-icon" aria-hidden />
+              手动终止输出
+            </button>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+  if (!thinking?.trim()) return null
+  return (
+    <div className={`chat-thinking ${open ? 'is-open' : ''}`}>
+      <button
+        type="button"
+        className="chat-thinking-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <span>思考过程</span>
+        <DownOutlined className="chat-thinking-chevron" />
+      </button>
+      {open ? <div className="chat-thinking-body">{thinking}</div> : null}
+    </div>
+  )
+}
+
+type ChatPageProps = {
+  onOpenSettings?: (section?: SettingsSection) => void
+}
+
+const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
   const currentReport = useAppStore((s) => s.currentReport)
   const history = useAppStore((s) => s.history)
   const config = useAppStore((s) => s.config)
@@ -88,11 +111,13 @@ const ChatPage = (): JSX.Element => {
   const activeChatId = useAppStore((s) => s.activeChatId)
   const chatSelectSeq = useAppStore((s) => s.chatSelectSeq)
   const setActiveChatId = useAppStore((s) => s.setActiveChatId)
+  const selectChatSession = useAppStore((s) => s.selectChatSession)
   const refreshChatSessions = useAppStore((s) => s.refreshChatSessions)
 
   const [active, setActive] = useState<ChatSession | null>(null)
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [reportId, setReportId] = useState<string | undefined>(currentReport?.id)
   const [commands, setCommands] = useState<ChatCommandDef[]>([])
   const [cmdOpen, setCmdOpen] = useState(false)
@@ -129,6 +154,25 @@ const ChatPage = (): JSX.Element => {
   const modelLabel = activeProvider
     ? activeProvider.displayName || activeProvider.model || activeProvider.name
     : '未配置模型'
+
+  const modelOptions = useMemo(() => {
+    return (config?.llmProviders ?? [])
+      .filter((p) => p.enabled)
+      .map((p) => ({
+        value: p.id,
+        label: p.displayName || p.model || p.name
+      }))
+  }, [config?.llmProviders])
+
+  const switchModel = async (providerId: string): Promise<void> => {
+    if (!config || !providerId || providerId === config.activeLlmProviderId) return
+    try {
+      await saveConfig({ ...config, activeLlmProviderId: providerId })
+      message.success('已切换模型')
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '切换模型失败')
+    }
+  }
 
   const slashQuery = useMemo(() => {
     if (!draft.startsWith('/')) return null
@@ -218,6 +262,7 @@ const ChatPage = (): JSX.Element => {
   const handleNewChat = async (): Promise<void> => {
     try {
       const session = await window.electronAPI.createChatSession(reportId)
+      selectChatSession(session.id)
       setActive(session)
       await refreshChatSessions(session.id)
     } catch (e) {
@@ -332,9 +377,37 @@ const ChatPage = (): JSX.Element => {
 
   const sendContent = async (content: string): Promise<void> => {
     const boundSessionId = activeChatId
+    const now = new Date().toISOString()
+    const optimisticId = `pending-user-${Date.now()}`
+    const optimisticUser: ChatMessage = {
+      id: optimisticId,
+      sessionId: boundSessionId || 'pending',
+      role: 'user',
+      content,
+      createdAt: now
+    }
+
     setSending(true)
     setDraft('')
     setCmdOpen(false)
+    // 主进程要等 LLM 整轮结束才返回；先本地插入用户消息，避免「思考中」看不到自己说的话
+    setActive((prev) => {
+      if (!prev) {
+        return {
+          id: boundSessionId || 'pending',
+          title: '新对话',
+          createdAt: now,
+          updatedAt: now,
+          messages: [optimisticUser]
+        }
+      }
+      return {
+        ...prev,
+        updatedAt: now,
+        messages: [...prev.messages, optimisticUser]
+      }
+    })
+
     try {
       const session = await window.electronAPI.sendChatMessage({
         sessionId: boundSessionId ?? undefined,
@@ -353,20 +426,95 @@ const ChatPage = (): JSX.Element => {
         setActive(session)
       }
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '发送失败')
+      const cancelled =
+        error instanceof Error &&
+        (error.name === 'GenerationCancelledError' ||
+          error.message === '已停止生成')
+      if (cancelled) {
+        message.info('已停止生成')
+        try {
+          if (boundSessionId) {
+            const full = await window.electronAPI.getChatSession(boundSessionId)
+            if (full && useAppStore.getState().activeChatId === boundSessionId) {
+              setActive(full)
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+      } else {
+        setActive((prev) => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            messages: prev.messages.filter((m) => m.id !== optimisticId)
+          }
+        })
+        message.error(error instanceof Error ? error.message : '发送失败')
+      }
     } finally {
       setSending(false)
     }
   }
 
+  const stopGeneration = (): void => {
+    if (!sending) return
+    void window.electronAPI.cancelChatGeneration()
+  }
+
   const regenerateLast = async (): Promise<void> => {
-    if (sending || !active?.messages?.length) return
+    if (sending || !active?.messages?.length || !activeChatId) return
     const lastUser = [...active.messages].reverse().find((m) => m.role === 'user')
     if (!lastUser?.content) {
       message.info('没有可重新生成的用户消息')
       return
     }
-    await sendContent(lastUser.content)
+
+    const boundSessionId = activeChatId
+    setSending(true)
+    // 乐观移除末尾 assistant，避免界面仍显示旧回复
+    setActive((prev) => {
+      if (!prev) return prev
+      const messages = [...prev.messages]
+      while (messages.length && messages[messages.length - 1].role === 'assistant') {
+        messages.pop()
+      }
+      return { ...prev, messages, updatedAt: new Date().toISOString() }
+    })
+
+    try {
+      const session = await window.electronAPI.sendChatMessage({
+        sessionId: boundSessionId,
+        content: lastUser.content,
+        reportId,
+        regenerate: true
+      })
+      await refreshChatSessions(session.id)
+      const currentId = useAppStore.getState().activeChatId
+      if (currentId === boundSessionId) {
+        setActive(session)
+      }
+    } catch (error) {
+      const cancelled =
+        error instanceof Error &&
+        (error.name === 'GenerationCancelledError' ||
+          error.message === '已停止生成')
+      if (cancelled) {
+        message.info('已停止生成')
+      } else {
+        message.error(error instanceof Error ? error.message : '重新生成失败')
+      }
+      try {
+        const full = await window.electronAPI.getChatSession(boundSessionId)
+        if (full && useAppStore.getState().activeChatId === boundSessionId) {
+          setActive(full)
+        }
+      } catch {
+        /* ignore */
+      }
+    } finally {
+      setSending(false)
+    }
   }
 
   const attachFiles = async (files: FileList | null): Promise<void> => {
@@ -414,15 +562,6 @@ const ChatPage = (): JSX.Element => {
     await sendContent(content)
   }
 
-  const copyText = async (text: string): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(text)
-      message.success('已复制')
-    } catch {
-      message.error('复制失败')
-    }
-  }
-
   const hasMessages = Boolean(active?.messages.length) || sending
   const durationLabel = active ? estimateDurationLabel(active.messages) : null
   const headerTitle = active?.title?.trim() || '新对话'
@@ -437,7 +576,7 @@ const ChatPage = (): JSX.Element => {
           </span>
           {active?.updatedAt ? (
             <span className="chat-page-header-time">
-              {formatChatTime(active.updatedAt)}
+              {formatDateTime(active.updatedAt)}
             </span>
           ) : null}
           <Dropdown
@@ -471,8 +610,8 @@ const ChatPage = (): JSX.Element => {
       <div className="chat-page-body" ref={listRef}>
         {!hasMessages ? (
           <div className="chat-welcome">
-            <div className="chat-welcome-mark">R</div>
-            <div className="chat-welcome-title">Work with Reviewer</div>
+            <img className="chat-welcome-mark" src={brandMark} alt="" width={44} height={44} />
+            <div className="chat-welcome-title">Work with Code Reviewer</div>
             <p className="chat-welcome-desc">
               输入 / 唤起命令（如 /review /help）。帮你审查代码、解读报告、给出修复建议。
             </p>
@@ -498,12 +637,13 @@ const ChatPage = (): JSX.Element => {
                 <div key={msg.id} className="chat-row assistant">
                   <div className="chat-assistant-card">
                     <div className="chat-assistant-head">
-                      <span className="chat-assistant-avatar">R</span>
-                      <span className="chat-assistant-name">Reviewer</span>
+                      <img className="chat-assistant-avatar" src={brandMark} alt="" width={22} height={22} />
+                      <span className="chat-assistant-name">Code Reviewer</span>
                       {isLastAssistant && durationLabel ? (
                         <span className="chat-assistant-meta">{durationLabel}</span>
                       ) : null}
                     </div>
+                    <ThinkingBlock thinking={msg.thinking} />
                     <MarkdownMessage
                       className="chat-assistant-content chat-md"
                       content={msg.content}
@@ -557,10 +697,10 @@ const ChatPage = (): JSX.Element => {
               <div className="chat-row assistant">
                 <div className="chat-assistant-card">
                   <div className="chat-assistant-head">
-                    <span className="chat-assistant-avatar">R</span>
-                    <span className="chat-assistant-name">Reviewer</span>
+                    <img className="chat-assistant-avatar" src={brandMark} alt="" width={22} height={22} />
+                    <span className="chat-assistant-name">Code Reviewer</span>
                   </div>
-                  <div className="chat-assistant-content chat-typing">正在思考…</div>
+                  <ThinkingBlock loading onStop={stopGeneration} />
                 </div>
               </div>
             ) : null}
@@ -672,21 +812,83 @@ const ChatPage = (): JSX.Element => {
               />
             </div>
             <div className="chat-composer-right">
-              <span className="chat-model-chip" title={activeProvider?.name}>
-                {modelLabel}
-              </span>
-              <button type="button" className="chat-icon-btn" title="快速模式">
-                <ThunderboltOutlined />
-              </button>
-              <button
-                type="button"
-                className={`chat-send ${draft.trim() && !sending ? 'ready' : ''}`}
-                disabled={!draft.trim() || sending}
-                title="发送"
-                onClick={() => void handleSend()}
+              <Dropdown
+                trigger={['click']}
+                open={modelMenuOpen}
+                onOpenChange={setModelMenuOpen}
+                disabled={sending}
+                placement="topRight"
+                dropdownRender={() => (
+                  <div className="chat-model-panel">
+                    <div className="chat-model-panel-title">已配置模型</div>
+                    <div className="chat-model-panel-list">
+                      {modelOptions.length === 0 ? (
+                        <div className="chat-model-panel-empty">暂无已启用模型</div>
+                      ) : (
+                        modelOptions.map((opt) => {
+                          const selected = opt.value === activeProvider?.id
+                          return (
+                            <button
+                              key={opt.value}
+                              type="button"
+                              className={`chat-model-panel-item ${selected ? 'is-selected' : ''}`}
+                              onClick={() => {
+                                void switchModel(opt.value)
+                                setModelMenuOpen(false)
+                              }}
+                            >
+                              <span className="chat-model-panel-name">{opt.label}</span>
+                              {selected ? <CheckOutlined className="chat-model-panel-check" /> : null}
+                            </button>
+                          )
+                        })
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="chat-model-panel-add"
+                      onClick={() => {
+                        setModelMenuOpen(false)
+                        onOpenSettings?.('llm')
+                      }}
+                    >
+                      <SettingOutlined />
+                      添加模型
+                    </button>
+                  </div>
+                )}
               >
-                <ArrowUpOutlined />
-              </button>
+                <button
+                  type="button"
+                  className="chat-model-trigger"
+                  title={activeProvider?.name || modelLabel}
+                  disabled={sending}
+                >
+                  <span className="chat-model-trigger-label">{modelLabel}</span>
+                  <UpOutlined className="chat-model-trigger-caret" />
+                </button>
+              </Dropdown>
+              {sending ? (
+                <button
+                  type="button"
+                  className="chat-send ready chat-send-stop"
+                  title="停止生成"
+                  aria-label="停止生成"
+                  onClick={stopGeneration}
+                >
+                  <span className="chat-stop-icon" aria-hidden />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className={`chat-send ${draft.trim() ? 'ready' : ''}`}
+                  disabled={!draft.trim()}
+                  title="发送"
+                  onClick={() => void handleSend()}
+                >
+                  <ArrowUpOutlined />
+                </button>
+              )}
             </div>
           </div>
         </div>

@@ -1,14 +1,7 @@
+import { formatDuration } from '../../shared/datetime'
 import type { ReviewFlowNode, FlowNodeStatus } from '../../shared/types'
 
-/** 格式化耗时展示 */
-export const formatDuration = (ms?: number): string => {
-  if (ms == null || Number.isNaN(ms)) return '—'
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`
-  const m = Math.floor(ms / 60_000)
-  const s = ((ms % 60_000) / 1000).toFixed(1)
-  return `${m}m ${s}s`
-}
+export { formatDuration }
 
 export class FlowTracker {
   private nodes: ReviewFlowNode[] = []
@@ -37,24 +30,31 @@ export class FlowTracker {
     detail?: string
   ): ReviewFlowNode[] {
     const now = Date.now()
-    const start = this.startedAt.get(id) ?? now
     const idx = this.nodes.findIndex((n) => n.id === id)
     const prev: ReviewFlowNode =
       idx >= 0
         ? this.nodes[idx]
-        : { id, name: id, status: 'running', startedAt: new Date(start).toISOString() }
+        : { id, name: id, status: 'running', startedAt: new Date(now).toISOString() }
+    const startFromMap = this.startedAt.get(id)
+    const startFromIso = prev.startedAt ? Date.parse(prev.startedAt) : NaN
+    const start =
+      startFromMap ??
+      (!Number.isNaN(startFromIso) ? startFromIso : now)
+    const startedAtIso =
+      prev.startedAt || new Date(start).toISOString()
     const node: ReviewFlowNode = {
       ...prev,
       id,
       name: prev.name || id,
       status,
-      startedAt: prev.startedAt || new Date(start).toISOString(),
+      startedAt: startedAtIso,
       endedAt: new Date(now).toISOString(),
       durationMs: Math.max(0, now - start),
       detail: detail ?? prev.detail
     }
     if (idx >= 0) this.nodes[idx] = node
     else this.nodes.push(node)
+    this.startedAt.delete(id)
     return this.snapshot()
   }
 

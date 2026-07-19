@@ -1,4 +1,7 @@
-import { app, dialog, ipcMain, type BrowserWindow } from 'electron'
+import { execFile } from 'child_process'
+import { existsSync, statSync } from 'fs'
+import { dirname } from 'path'
+import { app, dialog, ipcMain, shell, type BrowserWindow } from 'electron'
 import { IPC_CHANNELS } from '../../shared/ipc'
 import type {
   AppConfig,
@@ -12,7 +15,12 @@ import {
   redactConfigForRenderer,
   saveAppConfig
 } from '../config/store'
-import { getLatestReviewReport, listReviewReports, getReviewReportById } from '../database/db'
+import {
+  deleteReviewReport,
+  getLatestReviewReport,
+  listReviewReports,
+  getReviewReportById
+} from '../database/db'
 import { mcpRegistry } from '../mcp-manager/registry'
 import { reviewOrchestrator } from '../review-engine/orchestrator'
 import { parseCustomRulesFile } from '../review-engine/custom-rules'
@@ -21,11 +29,29 @@ import { checkAppUpdates } from '../updater'
 import { applyDocLlmConfig, buildDocDemoPayloads, loadDocDemoConfig } from '../review-engine/doc-demo'
 import { chatService } from '../review-engine/chat-service'
 import { listBranchesFromMcp, listReposFromMcp, warmMcpRepoCache } from '../review-engine/mcp-repos'
+import {
+  createRepoDir,
+  listRepoFiles,
+  readRepoFile,
+  writeRepoFile
+} from '../review-engine/repo-browser'
+import {
+  createLocalDir,
+  deleteLocalEntry,
+  listLocalFolder,
+  openLocalFolderDialog,
+  pickLocalDirectory,
+  readLocalFile,
+  renameLocalEntry,
+  saveLocalFileDialog,
+  writeLocalFile
+} from '../review-engine/local-files'
 import { clearMcpRepoCache } from '../review-engine/mcp-cache'
 import {
   cloudAddMcpFromCatalog,
   cloudFetchMcpCatalog,
   cloudFetchChatCommands,
+  cloudFetchCodeRepoCatalog,
   cloudFetchLlmCatalog,
   cloudFetchReviewMethods,
   cloudListOrgs,
@@ -55,6 +81,63 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
     const merged = mergeSecretsFromExisting(config, getAppConfig())
     return toRendererConfig(saveAppConfig(merged))
   })
+
+  ipcMain.handle(
+    IPC_CHANNELS.EXTERNAL_APP_VERIFY,
+    async (
+      _event,
+      payload: { providerId: string; accessToken?: string; baseUrl?: string }
+    ) => {
+      const { verifyExternalAppAuth } = await import('../review-engine/git-auth')
+      return verifyExternalAppAuth({
+        providerId: payload.providerId as import('../../shared/code-repo-providers').CodeRepoProviderId,
+        accessToken: payload.accessToken,
+        baseUrl: payload.baseUrl
+      })
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.EXTERNAL_APP_GET_SECRET,
+    (_event, providerId: string) => {
+      const config = getAppConfig()
+      const conn = config.externalApps?.providers?.[providerId]
+      const accessToken =
+        conn?.accessToken?.trim() ||
+        (providerId === 'github' ? config.githubToken?.trim() : '') ||
+        ''
+      return {
+        accessToken,
+        baseUrl: conn?.baseUrl?.trim() || ''
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.EXTERNAL_APP_LIST_REPOS,
+    async (
+      _event,
+      payload?: { providerId?: string; forceRefresh?: boolean }
+    ) => {
+      const { listReposFromExternalApps } = await import(
+        '../review-engine/external-app-repos'
+      )
+      return listReposFromExternalApps(payload)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.EXTERNAL_APP_LIST_BRANCHES,
+    async (
+      _event,
+      payload: { providerId: string; repoUrl: string }
+    ) => {
+      const { listBranchesFromExternalApp } = await import(
+        '../review-engine/external-app-repos'
+      )
+      return listBranchesFromExternalApp(payload)
+    }
+  )
 
   ipcMain.handle(IPC_CHANNELS.MCP_LIST_STATUS, async () => {
     const config = getAppConfig()
@@ -107,8 +190,200 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
     }
   )
 
+  ipcMain.handle(
+    IPC_CHANNELS.REPO_LIST_FILES,
+    async (
+      _event,
+      payload: {
+        repoUrl: string
+        branch?: string
+        mcpServerId?: string
+        forceRefresh?: boolean
+      }
+    ) => {
+      return listRepoFiles(payload)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.REPO_READ_FILE,
+    async (
+      _event,
+      payload: {
+        repoUrl: string
+        branch?: string
+        mcpServerId?: string
+        filePath: string
+      }
+    ) => {
+      return readRepoFile(payload)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.REPO_WRITE_FILE,
+    async (
+      _event,
+      payload: {
+        repoUrl: string
+        branch?: string
+        mcpServerId?: string
+        filePath: string
+        content: string
+      }
+    ) => {
+      return writeRepoFile(payload)
+    }
+  )
+
+  ipcMain.handle(IPC_CHANNELS.LOCAL_OPEN_FOLDER, async () => {
+    return openLocalFolderDialog()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.LOCAL_PICK_DIRECTORY, async () => {
+    return pickLocalDirectory('选择工作目录')
+  })
+
+  ipcMain.handle(IPC_CHANNELS.LOCAL_LIST_FOLDER, async (_event, rootPath: string) => {
+    return listLocalFolder(rootPath)
+  })
+
+  ipcMain.handle(
+    IPC_CHANNELS.LOCAL_READ_FILE,
+    async (_event, payload: { rootPath: string; filePath: string }) => {
+      return readLocalFile(payload)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.LOCAL_WRITE_FILE,
+    async (
+      _event,
+      payload: { rootPath?: string; filePath: string; content: string }
+    ) => {
+      return writeLocalFile(payload)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.LOCAL_SAVE_DIALOG,
+    async (
+      _event,
+      payload: { content: string; defaultPath?: string; rootPath?: string }
+    ) => {
+      return saveLocalFileDialog(payload)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.LOCAL_CREATE_DIR,
+    async (_event, payload: { rootPath: string; dirPath: string }) => {
+      return createLocalDir(payload)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.LOCAL_DELETE,
+    async (_event, payload: { rootPath: string; filePath: string }) => {
+      return deleteLocalEntry(payload)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.LOCAL_RENAME,
+    async (
+      _event,
+      payload: { rootPath: string; filePath: string; newName: string }
+    ) => {
+      return renameLocalEntry(payload)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.REPO_CREATE_DIR,
+    async (
+      _event,
+      payload: {
+        repoUrl: string
+        branch?: string
+        mcpServerId?: string
+        dirPath: string
+      }
+    ) => {
+      return createRepoDir(payload)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.SHELL_REVEAL_IN_FOLDER,
+    async (_event, targetPath: string) => {
+      const p = String(targetPath || '').trim()
+      if (!p || !existsSync(p)) throw new Error('路径不存在')
+      shell.showItemInFolder(p)
+      return { ok: true }
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.SHELL_OPEN_IN_TERMINAL,
+    async (_event, targetPath: string) => {
+      const p = String(targetPath || '').trim()
+      if (!p || !existsSync(p)) throw new Error('路径不存在')
+      const dir = statSync(p).isDirectory() ? p : dirname(p)
+      if (process.platform === 'darwin') {
+        await new Promise<void>((resolve, reject) => {
+          execFile('open', ['-a', 'Terminal', dir], (err) =>
+            err ? reject(err) : resolve()
+          )
+        })
+      } else if (process.platform === 'win32') {
+        // 用 cwd 进入目录，避免把路径拼进 /k 命令导致注入
+        await new Promise<void>((resolve, reject) => {
+          execFile(
+            process.env.ComSpec || 'cmd.exe',
+            ['/c', 'start', '', 'cmd.exe', '/k'],
+            { cwd: dir, windowsHide: false },
+            (err) => (err ? reject(err) : resolve())
+          )
+        })
+      } else {
+        await shell.openPath(dir)
+      }
+      return { ok: true }
+    }
+  )
+
+  /**
+   * 启动审查：首帧进度一出来就返回报告（status=running），
+   * 完整流程在后台继续，后续靠 REVIEW_PROGRESS 推送。
+   */
   ipcMain.handle(IPC_CHANNELS.REVIEW_START, async (_event, payload: StartReviewPayload) => {
-    return reviewOrchestrator.start(payload, () => undefined, getWindow)
+    return new Promise((resolve, reject) => {
+      let settled = false
+      void reviewOrchestrator
+        .start(
+          payload,
+          (report) => {
+            if (!settled) {
+              settled = true
+              resolve({ ...report })
+            }
+          },
+          getWindow
+        )
+        .then((final) => {
+          if (!settled) {
+            settled = true
+            resolve(final)
+          }
+        })
+        .catch((err) => {
+          if (!settled) {
+            settled = true
+            reject(err)
+          }
+        })
+    })
   })
 
   ipcMain.handle(IPC_CHANNELS.REVIEW_BATCH, async (_event, payloads: StartReviewPayload[]) => {
@@ -137,6 +412,19 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
       getReviewReportById(reportId) ||
       null
     )
+  })
+
+  ipcMain.handle(IPC_CHANNELS.REVIEW_DELETE, (_event, reportId: string) => {
+    if (!reportId) {
+      throw new Error('缺少报告 ID')
+    }
+    // 进行中的任务先取消，再删库
+    reviewOrchestrator.cancel(reportId)
+    const ok = deleteReviewReport(reportId)
+    if (!ok) {
+      throw new Error('报告不存在或已删除')
+    }
+    return { ok: true }
   })
 
   ipcMain.handle(
@@ -220,6 +508,10 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
 
   ipcMain.handle(IPC_CHANNELS.CHAT_SEND, async (_event, payload: SendChatPayload) => {
     return chatService.sendMessage(payload)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.CHAT_CANCEL, () => {
+    chatService.cancelGeneration()
   })
 
   ipcMain.handle(
@@ -345,6 +637,15 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
       return getReviewMethodCatalog()
     } catch {
       return getReviewMethodCatalog()
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.CLOUD_CODE_REPO_CATALOG, async (_event, q?: string) => {
+    try {
+      return await cloudFetchCodeRepoCatalog(q)
+    } catch (err) {
+      console.warn('[cloud:code-repo-catalog] fetch failed', err)
+      throw err
     }
   })
 

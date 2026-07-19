@@ -1,25 +1,30 @@
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
+import { formatDateTime } from '../../shared/datetime'
 import type { ReportOutputFormat, ReviewReport } from '../../shared/types'
 import { formatDuration } from './flow-tracker'
 
+/** 报告只收录 error；兼容历史数据中的 warning/info */
+const reportErrors = (report: ReviewReport): ReviewReport['issues'] =>
+  (report.issues ?? []).filter((i) => i.severity === 'error')
+
 export const buildMarkdownSummary = (report: ReviewReport): string => {
-  const errorCount = report.issues.filter((i) => i.severity === 'error').length
-  const warningCount = report.issues.filter((i) => i.severity === 'warning').length
-  const infoCount = report.issues.filter((i) => i.severity === 'info').length
+  const errors = reportErrors(report)
 
   const lines = [
     `# 代码审查报告`,
     '',
     `- 仓库: ${report.repoUrl}`,
     report.prNumber ? `- PR: #${report.prNumber}` : null,
-    `- 开始: ${report.createdAt}`,
-    report.finishedAt ? `- 结束: ${report.finishedAt}` : null,
+    `- 开始: ${formatDateTime(report.createdAt, report.createdAt || '-')}`,
+    report.finishedAt
+      ? `- 结束: ${formatDateTime(report.finishedAt, report.finishedAt)}`
+      : null,
     `- 总耗时: ${formatDuration(report.totalDurationMs)}`,
     report.pullSource ? `- 拉码来源: ${report.pullSource}` : null,
     report.fromCache ? `- 缓存: 命中` : null,
-    `- 问题总数: ${report.issues.length}（错误 ${errorCount} / 警告 ${warningCount} / 提示 ${infoCount}）`,
+    `- 错误数: ${errors.length}`,
     '',
     '## 流程时间线',
     ''
@@ -29,8 +34,15 @@ export const buildMarkdownSummary = (report: ReviewReport): string => {
     lines.push('（无节点记录）')
   } else {
     for (const node of report.flowTimeline) {
+      const when = [
+        formatDateTime(node.startedAt),
+        formatDateTime(node.endedAt)
+      ]
+        .filter(Boolean)
+        .join(' → ')
       lines.push(
         `- **${node.name}** · ${node.status} · ${formatDuration(node.durationMs)}` +
+          (when ? ` · ${when}` : '') +
           (node.detail ? ` — ${node.detail}` : '')
       )
     }
@@ -38,12 +50,12 @@ export const buildMarkdownSummary = (report: ReviewReport): string => {
 
   lines.push('', '## 问题列表', '')
 
-  if (report.issues.length === 0) {
-    lines.push('未发现问题。')
+  if (errors.length === 0) {
+    lines.push('未发现错误。')
   } else {
-    for (const issue of report.issues) {
+    for (const issue of errors) {
       lines.push(
-        `- **[${issue.severity}]** \`${issue.filePath}:${issue.line}\` (${issue.ruleId}) — ${issue.message}`
+        `- **[error]** \`${issue.filePath}:${issue.line}\` (${issue.ruleId}) — ${issue.message}`
       )
     }
   }
@@ -60,10 +72,11 @@ const escapeHtml = (value: string): string =>
 
 export const buildHtmlSummary = (report: ReviewReport): string => {
   const md = report.summaryMarkdown || buildMarkdownSummary(report)
-  const rows = report.issues
+  const errors = reportErrors(report)
+  const rows = errors
     .map(
       (issue) => `<tr>
-      <td>${escapeHtml(issue.severity)}</td>
+      <td>error</td>
       <td><code>${escapeHtml(issue.filePath)}:${issue.line}</code></td>
       <td>${escapeHtml(issue.ruleId)}</td>
       <td>${escapeHtml(issue.message)}</td>
@@ -91,10 +104,10 @@ export const buildHtmlSummary = (report: ReviewReport): string => {
 <body>
   <div class="card">
     <h1>代码审查报告</h1>
-    <div class="meta">${escapeHtml(report.repoUrl)} · 问题 ${report.issues.length} 条 · ${escapeHtml(formatDuration(report.totalDurationMs))}</div>
+    <div class="meta">${escapeHtml(report.repoUrl)} · 错误 ${errors.length} 条 · ${escapeHtml(formatDuration(report.totalDurationMs))}</div>
     <table>
       <thead><tr><th>级别</th><th>位置</th><th>规则</th><th>说明</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="4">未发现问题</td></tr>'}</tbody>
+      <tbody>${rows || '<tr><td colspan="4">未发现错误</td></tr>'}</tbody>
     </table>
     <h2 style="margin-top:24px;font-size:16px">Markdown 原文</h2>
     <pre>${escapeHtml(md)}</pre>
@@ -103,10 +116,14 @@ export const buildHtmlSummary = (report: ReviewReport): string => {
 </html>`
 }
 
+/**
+ * 将报告按所选格式写入目录（支持同时生成多种：md / html / json）。
+ * 流水线配置了工作区时，上层应传入 `{项目根}/分析报告`。
+ */
 export const persistReportFiles = (
   report: ReviewReport,
   outputDir?: string,
-  formats: ReportOutputFormat[] = ['md', 'json']
+  formats: ReportOutputFormat[] = ['md', 'html']
 ): string => {
   const dir =
     outputDir && outputDir.trim()
@@ -114,8 +131,12 @@ export const persistReportFiles = (
       : join(app.getPath('documents'), 'code-reviewer-client', 'reports')
 
   mkdirSync(dir, { recursive: true })
-  const base = `review-${report.id}`
-  const wanted = new Set(formats.length ? formats : ['md', 'json'])
+  // 同一报告 id 固定文件名，重复落盘会覆盖而不是再生成一份
+  const stamp = (report.finishedAt || report.createdAt || new Date().toISOString())
+    .replace(/[:.]/g, '-')
+    .slice(0, 19)
+  const base = `review-${stamp}-${report.id.slice(0, 8)}`
+  const wanted = new Set(formats.length ? formats : ['md', 'html'])
 
   if (wanted.has('json')) {
     writeFileSync(join(dir, `${base}.json`), JSON.stringify(report, null, 2), 'utf-8')

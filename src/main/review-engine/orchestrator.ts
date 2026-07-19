@@ -20,7 +20,12 @@ import { notifyReviewFinished } from './notify'
 import { fetchReviewFiles, languageFromPath } from './code-fetcher'
 import { cleanupGitWorkDir } from './git-fetcher'
 import { FlowTracker } from './flow-tracker'
+import { clampBatchReviewConcurrency } from '../../shared/batch-concurrency'
 import { resolveStaticRuleIds, reviewMethodById } from '../../shared/review-methods'
+import {
+  resolveAnalysisReportDir,
+  resolvePipelineProjectRoot
+} from '../../shared/repo-path'
 import type { ReportOutputFormat } from '../../shared/types'
 
 type ProgressCallback = (report: ReviewReport) => void
@@ -85,7 +90,38 @@ export class ReviewOrchestrator {
     onProgress: ProgressCallback,
     getWindow: () => BrowserWindow | null
   ): Promise<ReviewReport[]> {
-    return runPool(payloads, 2, (payload) => this.start(payload, onProgress, getWindow))
+    if (!payloads.length) return []
+    const concurrency = clampBatchReviewConcurrency(
+      getAppConfig().batchReviewConcurrency
+    )
+    // 单条失败不拖垮整批：start 内部多数错误已落 failed 报告；此处再兜底
+    return runPool(payloads, concurrency, async (payload) => {
+      try {
+        return await this.start(payload, onProgress, getWindow)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const failed: ReviewReport = {
+          id: randomUUID(),
+          repoUrl: payload.repoUrl || '',
+          prNumber: payload.prNumber,
+          commitSha: payload.commitSha,
+          createdAt: new Date().toISOString(),
+          status: 'failed',
+          progress: 0,
+          progressLabel: '审查失败',
+          error: message,
+          flowTimeline: [],
+          files: [],
+          issues: [],
+          summaryMarkdown: '',
+          finishedAt: new Date().toISOString()
+        }
+        saveReviewReport(failed)
+        onProgress(failed)
+        getWindow()?.webContents.send(IPC_CHANNELS.REVIEW_PROGRESS, failed)
+        return failed
+      }
+    })
   }
 
   async start(
@@ -119,12 +155,17 @@ export class ReviewOrchestrator {
         ? payload.reportFormats
         : pipeline?.reportFormats?.length
           ? pipeline.reportFormats
-          : ['md', 'json']
+          : ['md', 'html']
 
-    const focusHints = methodIds
+    const focusMethods = methodIds
       .map((id) => reviewMethodById(id))
-      .filter(Boolean)
-      .map((m) => `${m!.name}：${m!.description}`)
+      .filter((m): m is NonNullable<typeof m> => Boolean(m))
+      .map((m) => ({
+        id: m.id,
+        name: m.name,
+        description: m.description
+      }))
+    const focusHints = focusMethods.map((m) => `${m.name}：${m.description}`)
 
     const config = {
       ...baseConfig,
@@ -132,12 +173,20 @@ export class ReviewOrchestrator {
       activeLlmProviderId: llmProviderId || baseConfig.activeLlmProviderId
     }
 
+    const effectiveBranch =
+      payload.branch?.trim() || pipeline?.branch?.trim() || undefined
+    const runNote = payload.runNote?.trim() || undefined
+
     const flow = new FlowTracker()
     const report: ReviewReport = {
       id: randomUUID(),
       repoUrl: payload.repoUrl || pipeline?.repoUrl || '',
       prNumber: payload.prNumber || pipeline?.prNumber,
       commitSha: payload.commitSha || pipeline?.commitSha,
+      pipelineId: payload.pipelineId || pipeline?.id,
+      branch: effectiveBranch,
+      runNote,
+      methodIds: methodIds.length ? [...methodIds] : undefined,
       createdAt: new Date().toISOString(),
       status: 'running',
       progress: 5,
@@ -155,6 +204,8 @@ export class ReviewOrchestrator {
     const abort = new AbortController()
     abortControllers.set(report.id, abort)
     this.latest = report
+    // 尽早落库，便于启动后立刻打开报告页
+    saveReviewReport(report)
 
     const emit = (patch: Partial<ReviewReport>): void => {
       Object.assign(report, patch)
@@ -162,6 +213,12 @@ export class ReviewOrchestrator {
       onProgress(this.latest)
       getWindow()?.webContents.send(IPC_CHANNELS.REVIEW_PROGRESS, this.latest)
     }
+
+    // 立刻推一帧，让 IPC 可以提前返回并跳转报告页
+    emit({
+      progress: 5,
+      progressLabel: '初始化审查任务…'
+    })
 
     const emitFlow = (
       timeline: ReviewFlowNode[],
@@ -181,6 +238,17 @@ export class ReviewOrchestrator {
     }
 
     let workDir: string | undefined
+    let ephemeralWorkDir = false
+
+    /** 优先写入流水线工作区下的「分析报告」 */
+    const resolveReportOutDir = (): string | undefined => {
+      const projectRoot =
+        (workDir && !ephemeralWorkDir ? workDir : '') ||
+        resolvePipelineProjectRoot(pipeline?.workDir, report.repoUrl)
+      if (projectRoot) return resolveAnalysisReportDir(projectRoot)
+      const fallback = config.reportOutputDir?.trim()
+      return fallback || undefined
+    }
 
     try {
       // ① 初始化
@@ -209,9 +277,13 @@ export class ReviewOrchestrator {
         repoUrl: report.repoUrl,
         prNumber: report.prNumber,
         serverId: enabledServer?.id ?? null,
-        enableGitClone: config.enableGitClone
+        enableGitClone: config.enableGitClone,
+        branch: effectiveBranch,
+        workDir: pipeline?.workDir
       })
       workDir = fetched.workDir
+      // 仅显式 ephemeral 才视为临时目录；未返回时按持久工作区处理
+      ephemeralWorkDir = fetched.ephemeral === true
       const files = fetched.files
       for (const file of files) {
         file.language = file.language || languageFromPath(file.filePath)
@@ -253,29 +325,61 @@ export class ReviewOrchestrator {
           emitFlow(flow.end('cache', 'success', '命中缓存，复用历史结果'))
           const skipRest: Array<[string, string]> = [
             ['static', '④ 静态规则扫描'],
-            ['llm', '⑤ LLM 语义审查'],
-            ['merge', '⑥ 合并去重'],
-            ['report', '⑦ 生成报告']
+            ['llm', '⑤ 大模型重点审查'],
+            ...focusMethods.map(
+              (m) => [`check:${m.id}`, `⑤ · ${m.name}`] as [string, string]
+            ),
+            ['merge', '⑥ 合并去重']
           ]
           let timeline = flow.snapshot()
           for (const [id, name] of skipRest) {
             timeline = flow.skip(id, name, '因缓存命中跳过')
           }
+
+          // 先合并缓存内容，再写「分析报告」（缓存命中也要落盘到工作区）
+          const cachedIssues = (cached.issues ?? []).filter(
+            (issue) => issue.severity === 'error'
+          )
+          const cachedFiles = (cached.files ?? []).map((file) => ({
+            ...file,
+            issues: (file.issues ?? []).filter((issue) => issue.severity === 'error')
+          }))
+          Object.assign(report, {
+            ...cached,
+            id: report.id,
+            createdAt: report.createdAt,
+            pipelineId: report.pipelineId,
+            branch: report.branch,
+            runNote: report.runNote,
+            methodIds: report.methodIds,
+            fromCache: true,
+            pullSource: 'cache' as const,
+            issues: cachedIssues,
+            files: cachedFiles
+          })
+          timeline = flow.begin('report', '⑦ 生成报告')
+          report.summaryMarkdown = buildMarkdownSummary(report)
+          const writtenDir = persistReportFiles(
+            report,
+            resolveReportOutDir(),
+            reportFormats
+          )
+          timeline = flow.end(
+            'report',
+            'success',
+            `已写入 ${writtenDir}（${reportFormats.join('/')}）`
+          )
+
           timeline = flow.begin('done', '⑧ 完成')
           timeline = flow.end('done', 'success', '缓存复用完成')
 
           const reused: ReviewReport = {
-            ...cached,
-            id: report.id,
-            createdAt: report.createdAt,
-            fromCache: true,
-            pullSource: 'cache',
+            ...report,
             progress: 100,
             progressLabel: '⑧ 命中缓存，跳过扫描 / LLM',
             status: 'completed',
             ...finishMeta(flow, timeline)
           }
-          // 若缓存无时间线，补上本次扭转记录
           if (!reused.flowTimeline?.length) reused.flowTimeline = timeline
           Object.assign(report, reused)
           emit({ ...reused })
@@ -312,77 +416,142 @@ export class ReviewOrchestrator {
           config.enabledRuleIds,
           extraRules
         )
-        file.issues = issues
+        // 报告/UI 只展示 error；warning/info 不进入中间态
+        file.issues = issues.filter((issue) => issue.severity === 'error')
         return issues
       })
+      const staticErrors = staticIssues.filter((issue) => issue.severity === 'error')
       emitFlow(
         flow.end(
           'static',
           'success',
-          `命中 ${staticIssues.length} 条 · ${Date.now() - staticStarted}ms 内完成`
+          `命中 ${staticIssues.length} 条（错误 ${staticErrors.length}）· ${Date.now() - staticStarted}ms`
         ),
         {
           progress: 55,
-          progressLabel: `④ 静态扫描完成 · ${staticIssues.length} 条`,
-          issues: staticIssues,
+          progressLabel: `④ 静态扫描完成 · 错误 ${staticErrors.length} 条`,
+          issues: staticErrors,
           files: [...files]
         }
       )
       assertNotCancelled()
 
-      // ⑤ LLM
+      // ⑤ 大模型重点审查（按流水线勾选的审查方式拆分子节点）
       const activeProvider = resolveActiveProvider(config)
       const canLlm =
         config.enableLlm &&
         (!!activeProvider?.apiKey?.trim() || activeProvider?.protocol === 'ollama')
 
+      const matchMethodCount = (
+        issues: typeof staticIssues,
+        methodId: string
+      ): number =>
+        issues.filter((issue) => {
+          const rid = (issue.ruleId || '').toLowerCase()
+          const mid = methodId.toLowerCase()
+          return rid === mid || rid.includes(mid) || rid.startsWith(`${mid}`)
+        }).length
+
       let llmIssues: typeof staticIssues = []
       if (canLlm) {
+        const focusLabel = focusMethods.length
+          ? `重点 ${focusMethods.length} 项：${focusMethods.map((m) => m.name).join('、')}`
+          : `${activeProvider?.name} · ${activeProvider?.model}`
         emitFlow(
           flow.begin(
             'llm',
-            '⑤ LLM 语义审查',
-            `${activeProvider?.name} · ${activeProvider?.model}`
+            '⑤ 大模型重点审查',
+            `${activeProvider?.name} · ${activeProvider?.model}${
+              focusMethods.length ? ` · ${focusMethods.length} 项检查` : ''
+            }`
           ),
           {
             progress: 60,
-            progressLabel: `⑤ LLM 审查中 · ${activeProvider?.name ?? 'LLM'}…`
+            progressLabel: `⑤ 大模型审查中 · ${focusLabel}`
           }
         )
+        for (const method of focusMethods) {
+          emitFlow(
+            flow.begin(
+              `check:${method.id}`,
+              `⑤ · ${method.name}`,
+              method.description
+            ),
+            {
+              progressLabel: `⑤ 检查「${method.name}」…`
+            }
+          )
+        }
         try {
           llmIssues = await runLlmReview(files, config, abort.signal, {
             focusHints,
+            focusMethods,
             providerId: llmProviderId
           })
+          for (const method of focusMethods) {
+            const hit = matchMethodCount(llmIssues, method.id)
+            emitFlow(
+              flow.end(
+                `check:${method.id}`,
+                'success',
+                hit > 0 ? `命中 ${hit} 条` : '未发现问题'
+              )
+            )
+          }
           emitFlow(
-            flow.end('llm', 'success', `返回 ${llmIssues.length} 条语义问题`),
+            flow.end(
+              'llm',
+              'success',
+              focusMethods.length
+                ? `完成 ${focusMethods.length} 项重点检查 · 共 ${llmIssues.length} 条`
+                : `返回 ${llmIssues.length} 条语义问题`
+            ),
             {
               progress: 82,
-              progressLabel: `⑤ LLM 完成 · ${llmIssues.length} 条`
+              progressLabel: `⑤ 大模型完成 · ${llmIssues.length} 条`
             }
           )
         } catch (error) {
           if (abort.signal.aborted) throw new Error('审查已取消')
           const message = error instanceof Error ? error.message : String(error)
+          for (const method of focusMethods) {
+            emitFlow(
+              flow.end(`check:${method.id}`, 'failed', message.slice(0, 120))
+            )
+          }
           emitFlow(flow.end('llm', 'failed', message.slice(0, 240)), {
             progress: 82,
-            progressLabel: `⑤ LLM 失败，继续生成报告`
+            progressLabel: `⑤ 大模型失败，继续生成报告`
           })
         }
       } else {
         emitFlow(
-          flow.skip('llm', '⑤ LLM 语义审查', '未启用或未配置 API Key'),
-          { progress: 70, progressLabel: '⑤ 跳过 LLM' }
+          flow.skip(
+            'llm',
+            '⑤ 大模型重点审查',
+            '未启用或未配置 API Key'
+          ),
+          { progress: 70, progressLabel: '⑤ 跳过大模型审查' }
         )
+        for (const method of focusMethods) {
+          emitFlow(
+            flow.skip(
+              `check:${method.id}`,
+              `⑤ · ${method.name}`,
+              '大模型未启用，跳过该项'
+            )
+          )
+        }
       }
       assertNotCancelled()
 
-      // ⑥ 合并
+      // ⑥ 合并（报告只保留 error，丢弃 warning / info）
       emitFlow(flow.begin('merge', '⑥ 合并去重'), {
         progress: 88,
         progressLabel: '⑥ 合并问题列表…'
       })
-      const allIssues = dedupeIssues([...staticIssues, ...llmIssues])
+      const merged = dedupeIssues([...staticIssues, ...llmIssues])
+      const allIssues = merged.filter((issue) => issue.severity === 'error')
       for (const file of files) {
         file.issues = allIssues.filter((issue) => issue.filePath === file.filePath)
       }
@@ -390,30 +559,29 @@ export class ReviewOrchestrator {
         flow.end(
           'merge',
           'success',
-          `静态 ${staticIssues.length} + LLM ${llmIssues.length} → 去重后 ${allIssues.length}`
+          `静态 ${staticIssues.length} + LLM ${llmIssues.length} → 去重后 ${merged.length} · 错误 ${allIssues.length}`
         ),
         {
           progress: 90,
-          progressLabel: `⑥ 去重完成 · ${allIssues.length} 条`,
+          progressLabel: `⑥ 去重完成 · 错误 ${allIssues.length} 条`,
           issues: allIssues,
           files: [...files]
         }
       )
 
-      // ⑦ 写报告
+      // ⑦ 生成报告摘要（落盘放到完成后只写一次，避免重复文件）
       emitFlow(flow.begin('report', '⑦ 生成报告'), {
         progress: 92,
         progressLabel: '⑦ 生成报告…'
       })
       report.summaryMarkdown = buildMarkdownSummary(report)
-      const outputDir = persistReportFiles(report, config.reportOutputDir, reportFormats)
-      emitFlow(flow.end('report', 'success', `已写入 ${outputDir}（${reportFormats.join('/')}）`), {
+      emitFlow(flow.end('report', 'success', '摘要已生成'), {
         progress: 96,
-        progressLabel: '⑦ 报告已落盘',
+        progressLabel: '⑦ 报告摘要已生成',
         summaryMarkdown: report.summaryMarkdown
       })
 
-      // ⑧ 完成
+      // ⑧ 完成并落盘（每种格式各一份）
       emitFlow(flow.begin('done', '⑧ 完成'))
       const timeline = flow.end(
         'done',
@@ -429,12 +597,22 @@ export class ReviewOrchestrator {
         ...finishMeta(flow, timeline)
       }
       Object.assign(report, finished)
+      // 落盘前再次写回，避免中间 patch/缓存复用丢掉备注
+      if (runNote) report.runNote = runNote
+      if (effectiveBranch) report.branch = effectiveBranch
       report.summaryMarkdown = buildMarkdownSummary(report)
-      persistReportFiles(report, config.reportOutputDir, reportFormats)
+      const outputDir = persistReportFiles(
+        report,
+        resolveReportOutDir(),
+        reportFormats
+      )
 
       emit({
         ...finished,
-        summaryMarkdown: report.summaryMarkdown
+        summaryMarkdown: report.summaryMarkdown,
+        runNote: report.runNote,
+        branch: report.branch,
+        progressLabel: `⑧ 审查完成 · 已写入 ${outputDir}`
       })
 
       saveReviewReport(report)
@@ -454,18 +632,24 @@ export class ReviewOrchestrator {
       timeline = flow.begin('done', status === 'cancelled' ? '⑧ 已取消' : '⑧ 失败')
       timeline = flow.end('done', 'failed', message.slice(0, 240))
 
+      if (runNote) report.runNote = runNote
+      if (effectiveBranch) report.branch = effectiveBranch
+
       emit({
         status,
         progress: report.progress,
         progressLabel: status === 'cancelled' ? '已取消' : '审查失败',
         error: message,
+        runNote: report.runNote,
+        branch: report.branch,
         ...finishMeta(flow, timeline)
       })
       saveReviewReport(report)
       if (config.notifyOnComplete) notifyReviewFinished(report)
       return { ...report }
     } finally {
-      cleanupGitWorkDir(workDir)
+      // 用户配置的工作目录保留本地代码，仅清理临时目录
+      if (ephemeralWorkDir) cleanupGitWorkDir(workDir)
       cancelledIds.delete(report.id)
       abortControllers.delete(report.id)
     }

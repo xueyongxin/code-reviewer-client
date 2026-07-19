@@ -36,29 +36,46 @@ const extractJsonArray = (text: string): LlmIssuePayload[] => {
   }
 }
 
-const buildPrompt = (files: ReviewFileResult[], focusHints?: string[]): string => {
+export interface LlmFocusMethod {
+  id: string
+  name: string
+  description: string
+}
+
+const buildPrompt = (
+  files: ReviewFileResult[],
+  focusMethods?: LlmFocusMethod[]
+): string => {
   const snippets = files
-    .slice(0, 6)
+    .slice(0, 8)
     .map((file) => {
-      const body = file.content.split('\n').slice(0, 200).join('\n')
+      const body = file.content.split('\n').slice(0, 220).join('\n')
       return `### ${file.filePath}\n\`\`\`\n${body}\n\`\`\``
     })
     .join('\n\n')
 
   const focusBlock =
-    focusHints && focusHints.length
+    focusMethods && focusMethods.length
       ? [
-          '本次流水线指定重点审查项（请优先覆盖，仍可报告其它严重问题）：',
-          ...focusHints.map((h) => `- ${h}`),
+          '【强制重点】本次流水线已勾选下列审查方式。你必须逐项检查，优先报告这些类别的真实缺陷：',
+          ...focusMethods.map(
+            (m, i) =>
+              `${i + 1}. ruleId="${m.id}"｜${m.name}：${m.description}`
+          ),
+          '规则：',
+          '- 每条发现的 ruleId 必须使用上表对应 id（不要自造 ruleId）。',
+          '- 只报告确认的严重缺陷，severity 一律用 error；不要输出 warning / info。',
+          '- 若某项确认无问题可不报；但不得用行过长、命名风格等琐事充数。',
+          '- 可额外报告其它严重问题，但仍须归到最接近的 ruleId；无法归类则用 "llm-other"。',
           ''
         ]
       : []
 
   return [
-    '你是资深代码审查助手。请审查下列变更代码，找出真实问题（安全、正确性、可维护性）。',
+    '你是资深代码审查助手。请审查下列变更代码，只找出严重真实问题（安全、正确性、数据损坏、严重缺陷）。',
     ...focusBlock,
-    '只返回 JSON 数组，不要其他文字。每项字段：filePath, line, severity(error|warning|info), message, ruleId。',
-    '忽略风格吹毛求疵；不要重复显而易见的 console.log 之类（静态规则已覆盖）。最多返回 20 条。',
+    '只返回 JSON 数组，不要其他文字。每项字段：filePath, line, severity（固定为 error）, message, ruleId。',
+    '不要输出 warning / info；忽略风格与轻微可维护性建议。不要重复显而易见的 console.log 之类（静态规则已覆盖）。最多返回 24 条。',
     '',
     snippets
   ].join('\n')
@@ -242,6 +259,8 @@ const toIssues = (
       message: String(item.message).trim(),
       source: 'llm' as const
     }))
+    // 报告只收录 error
+    .filter((issue) => issue.severity === 'error')
 }
 
 /** 备用模型：优先提供商配置，其次全局配置，源码不写死厂商模型名 */
@@ -258,7 +277,11 @@ export const runLlmReview = async (
   files: ReviewFileResult[],
   config: AppConfig,
   signal?: AbortSignal,
-  options?: { focusHints?: string[]; providerId?: string }
+  options?: {
+    focusHints?: string[]
+    focusMethods?: LlmFocusMethod[]
+    providerId?: string
+  }
 ): Promise<ReviewIssue[]> => {
   if (!config.enableLlm) return []
 
@@ -270,7 +293,16 @@ export const runLlmReview = async (
     return []
   }
 
-  const prompt = buildPrompt(files, options?.focusHints)
+  const focusMethods =
+    options?.focusMethods?.length
+      ? options.focusMethods
+      : options?.focusHints?.map((h, i) => ({
+          id: `focus-${i + 1}`,
+          name: h.split('：')[0] || h,
+          description: h
+        }))
+
+  const prompt = buildPrompt(files, focusMethods)
   const models = modelFallbacks(provider, config)
   let lastError = ''
 

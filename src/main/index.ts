@@ -96,7 +96,7 @@ if (!gotLock) {
       ...(isMac
         ? {
             titleBarStyle: 'hiddenInset',
-            trafficLightPosition: { x: 14, y: 6 }
+            trafficLightPosition: { x: 14, y: 12 }
           }
         : {}),
       webPreferences: {

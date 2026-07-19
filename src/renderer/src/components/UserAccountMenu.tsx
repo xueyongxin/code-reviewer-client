@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { message } from 'antd'
+import { Dropdown, message } from 'antd'
+import type { MenuProps } from 'antd'
 import {
   GlobalOutlined,
   RightOutlined,
@@ -9,10 +10,13 @@ import {
   BgColorsOutlined,
   BellOutlined,
   BugOutlined,
-  MobileOutlined
+  MobileOutlined,
+  DownOutlined,
+  CheckOutlined
 } from '@ant-design/icons'
 import { useAppStore } from '../store/useAppStore'
 import { useAppearance } from '../prefs/AppearanceProvider'
+import type { AppLocale, ThemeMode } from '../prefs/appearance'
 import type { SettingsSection } from '../pages/ConfigPage'
 
 type Props = {
@@ -33,7 +37,7 @@ const UserAccountMenu = ({
   initials
 }: Props): JSX.Element => {
   const saveConfig = useAppStore((s) => s.saveConfig)
-  const { t, themeMode, locale } = useAppearance()
+  const { t, themeMode, locale, setThemeMode, setLocale } = useAppearance()
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -41,7 +45,16 @@ const UserAccountMenu = ({
   useEffect(() => {
     if (!open) return
     const onDoc = (e: MouseEvent): void => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+      const target = e.target as Node
+      if (rootRef.current?.contains(target)) return
+      // 下拉挂到 body，点选项时不要关掉账号菜单
+      if (
+        target instanceof Element &&
+        target.closest('.user-menu-quick-dropdown')
+      ) {
+        return
+      }
+      setOpen(false)
     }
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') setOpen(false)
@@ -88,6 +101,75 @@ const UserAccountMenu = ({
         : t('general.themeLight')
 
   const localeLabel = locale === 'en-US' ? t('general.langEn') : t('general.langZh')
+
+  const localeMenu: MenuProps = {
+    selectable: true,
+    selectedKeys: [locale],
+    className: 'user-menu-quick-dropdown',
+    items: [
+      {
+        key: 'zh-CN',
+        label: (
+          <span className="user-menu-option">
+            {t('general.langZh')}
+            {locale === 'zh-CN' ? <CheckOutlined /> : null}
+          </span>
+        )
+      },
+      {
+        key: 'en-US',
+        label: (
+          <span className="user-menu-option">
+            {t('general.langEn')}
+            {locale === 'en-US' ? <CheckOutlined /> : null}
+          </span>
+        )
+      }
+    ],
+    onClick: ({ key, domEvent }) => {
+      domEvent.stopPropagation()
+      setLocale(key as AppLocale)
+    }
+  }
+
+  const themeMenu: MenuProps = {
+    selectable: true,
+    selectedKeys: [themeMode],
+    className: 'user-menu-quick-dropdown',
+    items: [
+      {
+        key: 'light',
+        label: (
+          <span className="user-menu-option">
+            {t('general.themeLight')}
+            {themeMode === 'light' ? <CheckOutlined /> : null}
+          </span>
+        )
+      },
+      {
+        key: 'dark',
+        label: (
+          <span className="user-menu-option">
+            {t('general.themeDark')}
+            {themeMode === 'dark' ? <CheckOutlined /> : null}
+          </span>
+        )
+      },
+      {
+        key: 'system',
+        label: (
+          <span className="user-menu-option">
+            {t('general.themeSystem')}
+            {themeMode === 'system' ? <CheckOutlined /> : null}
+          </span>
+        )
+      }
+    ],
+    onClick: ({ key, domEvent }) => {
+      domEvent.stopPropagation()
+      setThemeMode(key as ThemeMode)
+    }
+  }
 
   return (
     <div className={`user-menu ${open ? 'open' : ''}`} ref={rootRef}>
@@ -170,40 +252,48 @@ const UserAccountMenu = ({
           <div className="user-menu-divider" />
 
           <div className="user-menu-list">
-            <button
-              type="button"
-              className="user-menu-item"
-              onClick={() => {
-                close()
-                onOpenSettings('general')
-              }}
-            >
+            <div className="user-menu-item user-menu-item-static">
               <span className="user-menu-item-left">
                 <GlobalOutlined />
                 {t('menu.language')}
               </span>
-              <span className="user-menu-item-right">
-                {localeLabel}
-                <RightOutlined className="user-menu-chevron" />
-              </span>
-            </button>
-            <button
-              type="button"
-              className="user-menu-item"
-              onClick={() => {
-                close()
-                onOpenSettings('general')
-              }}
-            >
+              <Dropdown
+                menu={localeMenu}
+                trigger={['click']}
+                placement="bottomRight"
+                overlayClassName="user-menu-quick-dropdown"
+              >
+                <button
+                  type="button"
+                  className="user-menu-select-trigger"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {localeLabel}
+                  <DownOutlined />
+                </button>
+              </Dropdown>
+            </div>
+            <div className="user-menu-item user-menu-item-static">
               <span className="user-menu-item-left">
                 <BgColorsOutlined />
                 {t('menu.theme')}
               </span>
-              <span className="user-menu-item-right">
-                {themeLabel}
-                <RightOutlined className="user-menu-chevron" />
-              </span>
-            </button>
+              <Dropdown
+                menu={themeMenu}
+                trigger={['click']}
+                placement="bottomRight"
+                overlayClassName="user-menu-quick-dropdown"
+              >
+                <button
+                  type="button"
+                  className="user-menu-select-trigger"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {themeLabel}
+                  <DownOutlined />
+                </button>
+              </Dropdown>
+            </div>
             <button
               type="button"
               className="user-menu-item"

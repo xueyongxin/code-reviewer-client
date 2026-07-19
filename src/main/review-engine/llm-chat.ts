@@ -20,12 +20,14 @@ const toApiMessages = (
   return [{ role: 'system', content: system }, ...filtered]
 }
 
+type ChatCallResult = { content: string; thinking?: string }
+
 const callOpenAiCompatible = async (
   provider: LlmProviderConfig,
   system: string,
   messages: Array<Pick<ChatMessage, 'role' | 'content'>>,
   signal?: AbortSignal
-): Promise<string> => {
+): Promise<ChatCallResult> => {
   const baseUrl = provider.baseUrl.replace(/\/$/, '')
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
@@ -45,9 +47,21 @@ const callOpenAiCompatible = async (
     throw new Error(`${provider.name} 调用失败 (${response.status}): ${detail.slice(0, 240)}`)
   }
   const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>
+    choices?: Array<{
+      message?: {
+        content?: string
+        reasoning_content?: string
+        reasoning?: string
+      }
+    }>
   }
-  return data.choices?.[0]?.message?.content?.trim() ?? ''
+  const message = data.choices?.[0]?.message
+  const thinking =
+    message?.reasoning_content?.trim() || message?.reasoning?.trim() || undefined
+  return {
+    content: message?.content?.trim() ?? '',
+    thinking
+  }
 }
 
 const callAnthropic = async (
@@ -55,7 +69,7 @@ const callAnthropic = async (
   system: string,
   messages: Array<Pick<ChatMessage, 'role' | 'content'>>,
   signal?: AbortSignal
-): Promise<string> => {
+): Promise<ChatCallResult> => {
   const baseUrl = provider.baseUrl.replace(/\/$/, '')
   const response = await fetch(`${baseUrl}/v1/messages`, {
     method: 'POST',
@@ -82,11 +96,13 @@ const callAnthropic = async (
   const data = (await response.json()) as {
     content?: Array<{ type?: string; text?: string }>
   }
-  return (data.content ?? [])
-    .filter((item) => item.type === 'text')
-    .map((item) => item.text || '')
-    .join('\n')
-    .trim()
+  return {
+    content: (data.content ?? [])
+      .filter((item) => item.type === 'text')
+      .map((item) => item.text || '')
+      .join('\n')
+      .trim()
+  }
 }
 
 const callOllama = async (
@@ -94,7 +110,7 @@ const callOllama = async (
   system: string,
   messages: Array<Pick<ChatMessage, 'role' | 'content'>>,
   signal?: AbortSignal
-): Promise<string> => {
+): Promise<ChatCallResult> => {
   const baseUrl = provider.baseUrl.replace(/\/$/, '')
   try {
     return await callOpenAiCompatible(
@@ -119,7 +135,7 @@ const callOllama = async (
       throw new Error(`${provider.name} 调用失败 (${response.status}): ${detail.slice(0, 240)}`)
     }
     const data = (await response.json()) as { message?: { content?: string } }
-    return data.message?.content?.trim() ?? ''
+    return { content: data.message?.content?.trim() ?? '' }
   }
 }
 
@@ -128,7 +144,7 @@ const callProviderChat = async (
   system: string,
   messages: Array<Pick<ChatMessage, 'role' | 'content'>>,
   signal?: AbortSignal
-): Promise<string> => {
+): Promise<ChatCallResult> => {
   if (provider.protocol === 'anthropic') {
     return callAnthropic(provider, system, messages, signal)
   }
@@ -143,7 +159,7 @@ export const runChatCompletion = async (
   system: string,
   messages: Array<Pick<ChatMessage, 'role' | 'content'>>,
   signal?: AbortSignal
-): Promise<{ content: string; model: string; providerName: string }> => {
+): Promise<{ content: string; thinking?: string; model: string; providerName: string }> => {
   const provider = resolveActiveProvider(config)
   if (!provider) {
     throw new Error('请先在 Settings 中配置并启用 LLM 模型')
@@ -163,9 +179,14 @@ export const runChatCompletion = async (
 
   for (const model of models) {
     try {
-      const content = await callProviderChat({ ...provider, model }, system, messages, signal)
-      if (content) {
-        return { content, model, providerName: provider.name }
+      const result = await callProviderChat({ ...provider, model }, system, messages, signal)
+      if (result.content || result.thinking) {
+        return {
+          content: result.content,
+          thinking: result.thinking,
+          model,
+          providerName: provider.name
+        }
       }
       lastError = `${provider.name}/${model} 返回空内容`
     } catch (error) {

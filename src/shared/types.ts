@@ -97,8 +97,13 @@ export interface AppConfig {
   updateFeedUrl?: string
   /** 优先使用的 PR 评论 MCP 工具名 */
   prCommentToolName?: string
-  /** 允许 Git 直连克隆拉取（不依赖 MCP） */
+  /** 允许通过 Git 克隆拉取代码到工作目录（流水线审查主路径） */
   enableGitClone: boolean
+  /**
+   * 批量运行流水线时的最大并发数（有界队列）。
+   * 默认 2，合法范围 1–5；瓶颈在网络/API，不宜按 CPU 核数拉满。
+   */
+  batchReviewConcurrency: number
   /** Review 页快捷仓库列表（每行一个 URL） */
   quickRepoUrls: string[]
   /** 全局备用模型列表（主模型失败时尝试） */
@@ -113,8 +118,52 @@ export interface AppConfig {
   reviewPipelines: ReviewPipeline[]
   /** 当前编辑/选中的流水线 id */
   activePipelineId?: string
+  /** IDE 最近打开的工作区（本机持久化） */
+  recentIdeProjects?: RecentIdeProject[]
   /** 云端 SaaS 账号与同步（Token 本地加密） */
   cloud?: CloudAccountConfig
+  /** 代码仓库授权（各代码托管平台 Token） */
+  externalApps?: ExternalAppsConfig
+}
+
+/** 外部代码仓库平台连接状态 */
+export interface ExternalAppConnection {
+  connected: boolean
+  /** 展示用账号/备注 */
+  accountLabel?: string
+  connectedAt?: string
+  /** Access Token / PAT（加密存储；GitHub 同步写入 githubToken） */
+  accessToken?: string
+  /** 自建实例根地址，如 https://gitlab.example.com */
+  baseUrl?: string
+}
+
+/**
+ * 代码仓库授权配置。
+ * providers 按平台 id 存储；兼容旧字段 github（飞书已废弃，读取时忽略）。
+ */
+export interface ExternalAppsConfig {
+  providers?: Record<string, ExternalAppConnection>
+  /** @deprecated 请用 providers.github */
+  github?: ExternalAppConnection
+  /** @deprecated 已移除，读取时忽略 */
+  feishu?: ExternalAppConnection
+}
+
+/** IDE「最近打开」条目（存本地配置库） */
+export interface RecentIdeProject {
+  id: string
+  kind: 'local' | 'pipeline'
+  openedAt: number
+  /** 本地文件夹绝对路径 */
+  localPath?: string
+  pipelineId?: string
+  pipelineName?: string
+  /** 仓库/项目短名 */
+  projectName?: string
+  repoUrl?: string
+  branch?: string
+  mcpServerId?: string
 }
 
 /** 桌面端连接 code-reviewer-server */
@@ -148,9 +197,23 @@ export interface ReviewPipeline {
   name: string
   /** 代码源仓库 URL（可来自 MCP / 快捷仓库） */
   repoUrl: string
+  /** 默认分支（审查时检出） */
   branch?: string
   prNumber?: string
   commitSha?: string
+  /**
+   * 工作目录：审查时将代码克隆到此本地路径。
+   * 留空则使用系统临时目录（审查结束后清理）。
+   */
+  workDir?: string
+  /**
+   * 代码源配置方式：
+   * - repo：从「代码仓库源」选择
+   * - custom：自定义 Git 手动填写
+   */
+  sourceKind?: 'repo' | 'custom'
+  /** 从代码仓库源选择时对应的平台 id */
+  codeRepoProviderId?: string
   /** 关联的 MCP Server id（可选，用于拉码） */
   mcpServerId?: string
   /** 勾选的审查方式 id（见 review-methods 目录） */
@@ -201,6 +264,14 @@ export interface ReviewReport {
   repoUrl: string
   prNumber?: string
   commitSha?: string
+  /** 关联的流水线 id（用于运行历史按流水线过滤） */
+  pipelineId?: string
+  /** 运行时检出的分支（展示用） */
+  branch?: string
+  /** 本次运行备注 */
+  runNote?: string
+  /** 本次实际执行的审查方式 id（流水线勾选项） */
+  methodIds?: string[]
   fromCache?: boolean
   createdAt: string
   /** 审查结束时间 */
@@ -224,6 +295,10 @@ export interface StartReviewPayload {
   repoUrl: string
   prNumber?: string
   commitSha?: string
+  /** 本次运行覆盖分支（不改流水线默认配置） */
+  branch?: string
+  /** 本次运行备注 */
+  runNote?: string
   forceRefresh?: boolean
   /** 使用已配置的流水线启动 */
   pipelineId?: string
@@ -262,6 +337,8 @@ export interface ChatMessage {
   sessionId: string
   role: ChatRole
   content: string
+  /** 模型思考过程（可折叠展示） */
+  thinking?: string
   createdAt: string
 }
 
@@ -279,6 +356,8 @@ export interface SendChatPayload {
   content: string
   /** 关联审查报告，便于带上下文对话 */
   reportId?: string
+  /** 重新生成：不追加用户消息，删除末尾 assistant 后重跑 */
+  regenerate?: boolean
 }
 
 export interface McpToolInfo {
@@ -316,9 +395,68 @@ export interface McpRepoSourceOption {
   connected: boolean
 }
 
+export interface ExtAppRepoOption {
+  url: string
+  name: string
+  fullName?: string
+  providerId: string
+  providerName: string
+  defaultBranch?: string
+}
+
+export interface ExtAppRepoSourceOption {
+  providerId: string
+  providerName: string
+  connected: boolean
+  accountLabel?: string
+}
+
+export interface RepoFileEntry {
+  path: string
+  type: 'file' | 'dir'
+  size?: number
+  /** 超过预览上限，树中展示但不可打开内容 */
+  tooLarge?: boolean
+}
+
+export type VerifyExternalAppPayload = {
+  providerId: string
+  accessToken?: string
+  baseUrl?: string
+}
+
+export type VerifyExternalAppResult =
+  | { ok: true; accountLabel: string }
+  | { ok: false; message: string }
+
 export interface ElectronAPI {
   getConfig: () => Promise<AppConfig>
   saveConfig: (config: AppConfig) => Promise<AppConfig>
+  /** 连接外部代码仓库前真实鉴权校验 */
+  verifyExternalApp: (
+    payload: VerifyExternalAppPayload
+  ) => Promise<VerifyExternalAppResult>
+  /** 编辑时回显已保存的 Token / 实例地址 */
+  getExternalAppSecret: (providerId: string) => Promise<{
+    accessToken: string
+    baseUrl: string
+  }>
+  /** 从已授权代码仓库拉取仓库列表（默认读 SQLite 缓存，forceRefresh 强制刷新） */
+  listExternalAppRepos: (payload?: {
+    providerId?: string
+    forceRefresh?: boolean
+  }) => Promise<{
+    repos: ExtAppRepoOption[]
+    errors: string[]
+    sources: ExtAppRepoSourceOption[]
+    fromCache?: boolean
+    stale?: boolean
+  }>
+  /** 从已授权代码仓库拉取分支列表 */
+  listExternalAppBranches: (payload: {
+    providerId: string
+    repoUrl: string
+  }) => Promise<{ branches: string[]; error?: string }>
   listMcpStatus: () => Promise<McpConnectionStatus[]>
   connectMcp: (serverId: string) => Promise<McpConnectionStatus>
   disconnectMcp: (serverId: string) => Promise<void>
@@ -335,12 +473,84 @@ export interface ElectronAPI {
     repoUrl: string
     forceRefresh?: boolean
   }) => Promise<{ branches: string[]; error?: string; fromCache?: boolean }>
+  listRepoFiles: (payload: {
+    repoUrl: string
+    branch?: string
+    mcpServerId?: string
+    forceRefresh?: boolean
+  }) => Promise<{ files: RepoFileEntry[]; rootLabel: string }>
+  readRepoFile: (payload: {
+    repoUrl: string
+    branch?: string
+    mcpServerId?: string
+    filePath: string
+  }) => Promise<{ content: string; language?: string; filePath: string }>
+  writeRepoFile: (payload: {
+    repoUrl: string
+    branch?: string
+    mcpServerId?: string
+    filePath: string
+    content: string
+  }) => Promise<{ ok: boolean; filePath: string }>
+  openLocalFolder: () => Promise<{
+    rootPath: string
+    rootLabel: string
+    files: RepoFileEntry[]
+  } | null>
+  /** 选择本地目录（仅返回路径，不扫描文件） */
+  pickLocalDirectory: () => Promise<string | null>
+  listLocalFolder: (rootPath: string) => Promise<{
+    rootPath: string
+    rootLabel: string
+    files: RepoFileEntry[]
+  }>
+  readLocalFile: (payload: {
+    rootPath: string
+    filePath: string
+  }) => Promise<{ content: string; language?: string; filePath: string }>
+  writeLocalFile: (payload: {
+    rootPath?: string
+    filePath: string
+    content: string
+  }) => Promise<{ ok: boolean; filePath: string }>
+  saveLocalFileDialog: (payload: {
+    content: string
+    defaultPath?: string
+    rootPath?: string
+  }) => Promise<{
+    absPath: string
+    filePath: string
+    rootPath?: string
+    language?: string
+  } | null>
+  createLocalDir: (payload: {
+    rootPath: string
+    dirPath: string
+  }) => Promise<{ ok: boolean; dirPath: string }>
+  deleteLocalEntry: (payload: {
+    rootPath: string
+    filePath: string
+  }) => Promise<{ ok: boolean }>
+  renameLocalEntry: (payload: {
+    rootPath: string
+    filePath: string
+    newName: string
+  }) => Promise<{ ok: boolean; filePath: string }>
+  createRepoDir: (payload: {
+    repoUrl: string
+    branch?: string
+    mcpServerId?: string
+    dirPath: string
+  }) => Promise<{ ok: boolean; dirPath: string }>
+  revealInFolder: (targetPath: string) => Promise<{ ok: boolean }>
+  openInTerminal: (targetPath: string) => Promise<{ ok: boolean }>
   startReview: (payload: StartReviewPayload) => Promise<ReviewReport>
   startBatchReview: (payloads: StartReviewPayload[]) => Promise<ReviewReport[]>
   cancelReview: (reportId: string) => Promise<void>
   getLatestReport: () => Promise<ReviewReport | null>
   getReportHistory: () => Promise<ReviewReport[]>
   getReportById: (reportId: string) => Promise<ReviewReport | null>
+  deleteReport: (reportId: string) => Promise<{ ok: boolean }>
   postPrComments: (payload: PostPrCommentsPayload) => Promise<PostPrCommentsResult>
   importCustomRules: () => Promise<ImportRulesResult>
   checkForUpdates: () => Promise<UpdateCheckResult>
@@ -354,6 +564,7 @@ export interface ElectronAPI {
   createChatSession: (reportId?: string) => Promise<ChatSession>
   deleteChatSession: (sessionId: string) => Promise<void>
   sendChatMessage: (payload: SendChatPayload) => Promise<ChatSession>
+  cancelChatGeneration: () => Promise<void>
   cloudLogin: (payload: {
     email: string
     password: string
@@ -446,6 +657,19 @@ export interface ElectronAPI {
     }>
   >
   cloudLlmCatalog: (q?: string) => Promise<LlmProviderPreset[]>
+  /** 代码仓库平台目录（仅服务端已开启项） */
+  cloudCodeRepoCatalog: (q?: string) => Promise<
+    Array<{
+      key: string
+      name: string
+      description?: string
+      tokenUrl?: string
+      logoUrl?: string
+      needsBaseUrl?: boolean
+      baseUrlPlaceholder?: string
+      sortOrder?: number
+    }>
+  >
   cloudChatCommands: (q?: string) => Promise<
     Array<{
       id: string

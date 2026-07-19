@@ -2,6 +2,9 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypt
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { app, safeStorage } from 'electron'
+import { SECRET_CLEAR } from '../../shared/secret-tokens'
+
+export { SECRET_CLEAR }
 
 /** 磁盘密文前缀：safeStorage / AES 兜底 */
 export const ENC_SS_PREFIX = 'enc::'
@@ -157,6 +160,7 @@ export const maskEnvMap = (
 
 /**
  * 渲染进程回写：掩码或空串视为「未改」，保留原值。
+ * 传入 SECRET_CLEAR 表示显式清空。
  * 主进程内部请直接写明文/空串，不要走此合并。
  */
 export const mergeSecretField = (
@@ -164,6 +168,7 @@ export const mergeSecretField = (
   existing: string | undefined
 ): string => {
   if (incoming == null) return existing || ''
+  if (incoming === SECRET_CLEAR) return ''
   if (isSecretMasked(incoming)) return existing || ''
   if (incoming === '') return existing || ''
   return incoming

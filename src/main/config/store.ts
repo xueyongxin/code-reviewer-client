@@ -1,5 +1,17 @@
 import Store from 'electron-store'
-import type { AppConfig, LlmProviderConfig, McpMarketplaceItem, McpPreset } from '../../shared/types'
+import type {
+  AppConfig,
+  ExternalAppConnection,
+  ExternalAppsConfig,
+  LlmProviderConfig,
+  McpMarketplaceItem,
+  McpPreset
+} from '../../shared/types'
+import {
+  DEFAULT_BATCH_REVIEW_CONCURRENCY,
+  clampBatchReviewConcurrency
+} from '../../shared/batch-concurrency'
+import { normalizeReviewPipelines } from '../../shared/review-pipelines'
 import { DEFAULT_RULE_IDS } from '../review-engine/static-rules'
 import { getAppConfigPayload, saveAppConfigPayload } from '../database/db'
 import marketplaceSeed from './mcp-marketplace-seed.json'
@@ -26,6 +38,11 @@ const hasPlaintextSecretsOnDisk = (raw: AppConfig): boolean => {
   const check = (v?: string) => Boolean(v && !isDiskEncrypted(v))
   if (check(raw.githubToken) || check(raw.llmApiKey)) return true
   if (check(raw.cloud?.accessToken) || check(raw.cloud?.refreshToken)) return true
+  for (const conn of Object.values(raw.externalApps?.providers ?? {})) {
+    if (check(conn?.accessToken)) return true
+  }
+  if (check(raw.externalApps?.github?.accessToken)) return true
+  if (check(raw.externalApps?.feishu?.accessToken)) return true
   for (const p of raw.llmProviders ?? []) {
     if (check(p.apiKey)) return true
   }
@@ -60,6 +77,7 @@ const defaults: AppConfig = {
   mcpMarketplace: [],
   reviewPipelines: [],
   activePipelineId: '',
+  recentIdeProjects: [],
   githubToken: '',
   llmApiKey: '',
   llmBaseUrl: '',
@@ -78,11 +96,53 @@ const defaults: AppConfig = {
   updateFeedUrl: '',
   prCommentToolName: '',
   enableGitClone: true,
+  batchReviewConcurrency: DEFAULT_BATCH_REVIEW_CONCURRENCY,
   cloud: {
     apiBase: 'http://localhost:3100',
     authWebBase: 'http://localhost:3000',
     autoUploadReports: false
+  },
+  externalApps: {
+    providers: {}
   }
+}
+
+const mapProviderSecrets = (
+  providers: Record<string, ExternalAppConnection> | undefined,
+  mapToken: (v?: string) => string | undefined
+): Record<string, ExternalAppConnection> => {
+  const out: Record<string, ExternalAppConnection> = {}
+  for (const [id, conn] of Object.entries(providers ?? {})) {
+    if (!conn) continue
+    out[id] = {
+      ...conn,
+      accessToken: mapToken(conn.accessToken)
+    }
+  }
+  return out
+}
+
+/** 归一化 externalApps：旧 github/feishu → providers，丢弃飞书 */
+const normalizeExternalApps = (
+  raw: ExternalAppsConfig | undefined,
+  githubToken?: string
+): ExternalAppsConfig => {
+  const providers: Record<string, ExternalAppConnection> = {
+    ...(raw?.providers ?? {})
+  }
+  if (raw?.github && !providers.github) {
+    providers.github = { ...raw.github }
+  }
+  if (githubToken?.trim() && !providers.github?.connected) {
+    providers.github = {
+      connected: true,
+      accountLabel: providers.github?.accountLabel || 'GitHub Token',
+      connectedAt: providers.github?.connectedAt,
+      accessToken: providers.github?.accessToken || githubToken
+    }
+  }
+  // 飞书已下线，不迁入 providers
+  return { providers }
 }
 
 /** 兼容旧版 electron-store，仅作一次性迁移来源 */
@@ -109,7 +169,14 @@ const withDecryptedSecrets = (config: AppConfig): AppConfig => ({
         accessToken: decryptSecret(config.cloud.accessToken),
         refreshToken: decryptSecret(config.cloud.refreshToken)
       }
-    : config.cloud
+    : config.cloud,
+  externalApps: config.externalApps
+    ? {
+        providers: mapProviderSecrets(config.externalApps.providers, (v) =>
+          decryptSecret(v)
+        )
+      }
+    : config.externalApps
 })
 
 const withEncryptedSecrets = (config: AppConfig): AppConfig => ({
@@ -130,7 +197,14 @@ const withEncryptedSecrets = (config: AppConfig): AppConfig => ({
         accessToken: encryptSecret(config.cloud.accessToken),
         refreshToken: encryptSecret(config.cloud.refreshToken)
       }
-    : config.cloud
+    : config.cloud,
+  externalApps: config.externalApps
+    ? {
+        providers: mapProviderSecrets(config.externalApps.providers, (v) =>
+          encryptSecret(v)
+        )
+      }
+    : config.externalApps
 })
 
 const migrateProviders = (config: AppConfig): LlmProviderConfig[] => {
@@ -153,14 +227,21 @@ const migrateProviders = (config: AppConfig): LlmProviderConfig[] => {
 
 const normalizeConfig = (raw: AppConfig): AppConfig => {
   const llmProviders = migrateProviders({ ...defaults, ...raw })
+  const pipelinesNorm = normalizeReviewPipelines(raw.reviewPipelines, {
+    previous: raw.reviewPipelines,
+    activePipelineId: raw.activePipelineId
+  })
   const merged = withDecryptedSecrets({
     ...defaults,
     ...raw,
     mcpServers: raw.mcpServers ?? [],
     mcpPresets: raw.mcpPresets ?? [],
     mcpMarketplace: raw.mcpMarketplace ?? [],
-    reviewPipelines: raw.reviewPipelines ?? [],
-    activePipelineId: raw.activePipelineId ?? '',
+    reviewPipelines: pipelinesNorm.pipelines,
+    activePipelineId: pipelinesNorm.activePipelineId,
+    recentIdeProjects: Array.isArray(raw.recentIdeProjects)
+      ? raw.recentIdeProjects
+      : [],
     llmProviderPresets: raw.llmProviderPresets ?? [],
     llmFallbackModels: raw.llmFallbackModels ?? [],
     quickRepoUrls: raw.quickRepoUrls ?? [],
@@ -172,6 +253,9 @@ const normalizeConfig = (raw: AppConfig): AppConfig => {
     enableLlm: raw.enableLlm ?? true,
     prCommentToolName: raw.prCommentToolName ?? '',
     enableGitClone: raw.enableGitClone ?? true,
+    batchReviewConcurrency: clampBatchReviewConcurrency(
+      raw.batchReviewConcurrency ?? DEFAULT_BATCH_REVIEW_CONCURRENCY
+    ),
     cloud: {
       apiBase: raw.cloud?.apiBase || 'http://localhost:3100',
       authWebBase: raw.cloud?.authWebBase || 'http://localhost:3000',
@@ -184,6 +268,7 @@ const normalizeConfig = (raw: AppConfig): AppConfig => {
       lastSyncAt: raw.cloud?.lastSyncAt,
       autoUploadReports: raw.cloud?.autoUploadReports ?? false
     },
+    externalApps: normalizeExternalApps(raw.externalApps, raw.githubToken),
     llmProviders
   })
 
@@ -255,8 +340,15 @@ const ensureMarketplaceCatalog = (config: AppConfig): AppConfig => {
 export const getAppConfig = (): AppConfig => {
   const raw = loadRawConfig()
   const config = ensureMarketplaceCatalog(normalizeConfig(raw))
-  // 升级迁移：历史明文密钥立即加密落盘
-  if (hasPlaintextSecretsOnDisk(raw)) {
+  const rawPipeSig = JSON.stringify(
+    (raw.reviewPipelines ?? []).map((p) => p.id || '')
+  )
+  const nextPipeSig = JSON.stringify(config.reviewPipelines.map((p) => p.id))
+  const pipelinesRepaired =
+    rawPipeSig !== nextPipeSig ||
+    (raw.activePipelineId || '') !== (config.activePipelineId || '')
+  // 升级迁移：明文密钥加密落盘；流水线 ID 补齐/去重后立即写回，保证幂等
+  if (hasPlaintextSecretsOnDisk(raw) || pipelinesRepaired) {
     const encrypted = withEncryptedSecrets(config)
     saveAppConfigPayload(encrypted)
     try {
@@ -289,7 +381,14 @@ export const redactConfigForRenderer = (config: AppConfig): AppConfig => ({
         accessToken: maskSecret(config.cloud.accessToken),
         refreshToken: maskSecret(config.cloud.refreshToken)
       }
-    : config.cloud
+    : config.cloud,
+  externalApps: config.externalApps
+    ? {
+        providers: mapProviderSecrets(config.externalApps.providers, (v) =>
+          maskSecret(v)
+        )
+      }
+    : config.externalApps
 })
 
 /**
@@ -326,15 +425,45 @@ export const mergeSecretsFromExisting = (
             existing.cloud?.refreshToken
           )
         }
-      : incoming.cloud
+      : incoming.cloud,
+    externalApps: (() => {
+      // 显式提交 externalApps 时，以入站 providers 为准（删除的平台不再从旧配置恢复）
+      if (incoming.externalApps == null) return existing.externalApps
+      const incomingProviders = incoming.externalApps.providers ?? {}
+      const existingProviders = existing.externalApps?.providers ?? {}
+      const providers: Record<string, ExternalAppConnection> = {}
+      for (const id of Object.keys(incomingProviders)) {
+        const next = incomingProviders[id]
+        const prev = existingProviders[id]
+        providers[id] = {
+          ...next,
+          accessToken: mergeSecretField(next.accessToken, prev?.accessToken)
+        }
+      }
+      return { providers }
+    })()
   }
 }
 
 export const saveAppConfig = (config: AppConfig): AppConfig => {
   const existing = getAppConfigPayload()
+  const incomingPipelines =
+    config.reviewPipelines != null
+      ? config.reviewPipelines
+      : (existing?.reviewPipelines ?? [])
+  const pipelinesNorm = normalizeReviewPipelines(incomingPipelines, {
+    previous: existing?.reviewPipelines ?? incomingPipelines,
+    activePipelineId:
+      config.activePipelineId ?? existing?.activePipelineId ?? ''
+  })
   // 目录类配置（市场/预设）若本次未带上，保留库内已有，避免被空数组覆盖
   const merged: AppConfig = {
     ...config,
+    batchReviewConcurrency: clampBatchReviewConcurrency(
+      config.batchReviewConcurrency ??
+        existing?.batchReviewConcurrency ??
+        DEFAULT_BATCH_REVIEW_CONCURRENCY
+    ),
     mcpMarketplace:
       config.mcpMarketplace?.length > 0
         ? config.mcpMarketplace
@@ -347,10 +476,12 @@ export const saveAppConfig = (config: AppConfig): AppConfig => {
     llmProviderPresets: Array.isArray(config.llmProviderPresets)
       ? config.llmProviderPresets
       : (existing?.llmProviderPresets ?? []),
-    reviewPipelines:
-      config.reviewPipelines != null
-        ? config.reviewPipelines
-        : (existing?.reviewPipelines ?? [])
+    reviewPipelines: pipelinesNorm.pipelines,
+    activePipelineId: pipelinesNorm.activePipelineId,
+    recentIdeProjects:
+      config.recentIdeProjects != null
+        ? config.recentIdeProjects
+        : (existing?.recentIdeProjects ?? [])
   }
   const encrypted = withEncryptedSecrets(merged)
   saveAppConfigPayload(encrypted)

@@ -639,6 +639,28 @@ export const cloudFetchReviewMethods = async (
   })
 }
 
+/** 从服务端拉取代码仓库平台目录（公开接口，仅 published） */
+export const cloudFetchCodeRepoCatalog = async (
+  q?: string
+): Promise<
+  Array<{
+    key: string
+    name: string
+    description?: string
+    tokenUrl?: string
+    logoUrl?: string
+    needsBaseUrl?: boolean
+    baseUrlPlaceholder?: string
+    sortOrder?: number
+  }>
+> => {
+  const cloud = cloudOf(getAppConfig())
+  const qs = q ? `?q=${encodeURIComponent(q)}` : ''
+  return apiRequest(`/api/v1/code-repo-catalog${qs}`, {
+    apiBase: cloud.apiBase || DEFAULT_API_BASE
+  })
+}
+
 /** 从服务端拉取内置 LLM 服务商/模型目录（公开接口） */
 export const cloudFetchLlmCatalog = async (
   q?: string

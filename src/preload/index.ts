@@ -12,6 +12,14 @@ import { IPC_CHANNELS } from '../shared/ipc'
 const api: ElectronAPI = {
   getConfig: () => ipcRenderer.invoke(IPC_CHANNELS.GET_CONFIG),
   saveConfig: (config: AppConfig) => ipcRenderer.invoke(IPC_CHANNELS.SAVE_CONFIG, config),
+  verifyExternalApp: (payload) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EXTERNAL_APP_VERIFY, payload),
+  getExternalAppSecret: (providerId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EXTERNAL_APP_GET_SECRET, providerId),
+  listExternalAppRepos: (payload) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EXTERNAL_APP_LIST_REPOS, payload),
+  listExternalAppBranches: (payload) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EXTERNAL_APP_LIST_BRANCHES, payload),
   listMcpStatus: () => ipcRenderer.invoke(IPC_CHANNELS.MCP_LIST_STATUS),
   connectMcp: (serverId: string) => ipcRenderer.invoke(IPC_CHANNELS.MCP_CONNECT, serverId),
   disconnectMcp: (serverId: string) => ipcRenderer.invoke(IPC_CHANNELS.MCP_DISCONNECT, serverId),
@@ -19,6 +27,25 @@ const api: ElectronAPI = {
     ipcRenderer.invoke(IPC_CHANNELS.MCP_LIST_REPOS, payload),
   listMcpBranches: (payload) =>
     ipcRenderer.invoke(IPC_CHANNELS.MCP_LIST_BRANCHES, payload),
+  listRepoFiles: (payload) => ipcRenderer.invoke(IPC_CHANNELS.REPO_LIST_FILES, payload),
+  readRepoFile: (payload) => ipcRenderer.invoke(IPC_CHANNELS.REPO_READ_FILE, payload),
+  writeRepoFile: (payload) => ipcRenderer.invoke(IPC_CHANNELS.REPO_WRITE_FILE, payload),
+  openLocalFolder: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_OPEN_FOLDER),
+  pickLocalDirectory: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_PICK_DIRECTORY),
+  listLocalFolder: (rootPath) =>
+    ipcRenderer.invoke(IPC_CHANNELS.LOCAL_LIST_FOLDER, rootPath),
+  readLocalFile: (payload) => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_READ_FILE, payload),
+  writeLocalFile: (payload) => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_WRITE_FILE, payload),
+  saveLocalFileDialog: (payload) =>
+    ipcRenderer.invoke(IPC_CHANNELS.LOCAL_SAVE_DIALOG, payload),
+  createLocalDir: (payload) => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_CREATE_DIR, payload),
+  deleteLocalEntry: (payload) => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_DELETE, payload),
+  renameLocalEntry: (payload) => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_RENAME, payload),
+  createRepoDir: (payload) => ipcRenderer.invoke(IPC_CHANNELS.REPO_CREATE_DIR, payload),
+  revealInFolder: (targetPath) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SHELL_REVEAL_IN_FOLDER, targetPath),
+  openInTerminal: (targetPath) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SHELL_OPEN_IN_TERMINAL, targetPath),
   startReview: (payload: StartReviewPayload) =>
     ipcRenderer.invoke(IPC_CHANNELS.REVIEW_START, payload),
   startBatchReview: (payloads: StartReviewPayload[]) =>
@@ -27,6 +54,7 @@ const api: ElectronAPI = {
   getLatestReport: () => ipcRenderer.invoke(IPC_CHANNELS.REVIEW_LATEST),
   getReportHistory: () => ipcRenderer.invoke(IPC_CHANNELS.REVIEW_HISTORY),
   getReportById: (reportId: string) => ipcRenderer.invoke(IPC_CHANNELS.REVIEW_GET, reportId),
+  deleteReport: (reportId: string) => ipcRenderer.invoke(IPC_CHANNELS.REVIEW_DELETE, reportId),
   postPrComments: (payload: PostPrCommentsPayload) =>
     ipcRenderer.invoke(IPC_CHANNELS.REVIEW_POST_COMMENTS, payload),
   importCustomRules: () => ipcRenderer.invoke(IPC_CHANNELS.RULES_IMPORT),
@@ -40,6 +68,7 @@ const api: ElectronAPI = {
     ipcRenderer.invoke(IPC_CHANNELS.CHAT_DELETE, sessionId),
   sendChatMessage: (payload: SendChatPayload) =>
     ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, payload),
+  cancelChatGeneration: () => ipcRenderer.invoke(IPC_CHANNELS.CHAT_CANCEL),
   cloudLogin: (payload) => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_LOGIN, payload),
   cloudLoginPhone: (payload) => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_LOGIN_PHONE, payload),
   cloudLoginSms: (payload) => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_LOGIN_SMS, payload),
@@ -76,6 +105,8 @@ const api: ElectronAPI = {
     ipcRenderer.invoke(IPC_CHANNELS.CLOUD_REVIEW_METHODS, q),
   cloudLlmCatalog: (q?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.CLOUD_LLM_CATALOG, q),
+  cloudCodeRepoCatalog: (q?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CLOUD_CODE_REPO_CATALOG, q),
   cloudChatCommands: (q?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.CLOUD_CHAT_COMMANDS, q),
   onReviewProgress: (callback) => {

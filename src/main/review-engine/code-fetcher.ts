@@ -1,4 +1,5 @@
 import type { ReviewFileResult } from '../../shared/types'
+import { languageFromPath } from '../../shared/language'
 import { mcpRegistry } from '../mcp-manager/registry'
 
 export const extractTextContent = (toolResult: unknown): string => {
@@ -19,16 +20,7 @@ export const parseGithubRepo = (
   return { owner: match[1], repo: match[2].replace(/\.git$/, '') }
 }
 
-export const languageFromPath = (filePath: string): string => {
-  if (filePath.endsWith('.tsx') || filePath.endsWith('.ts')) return 'typescript'
-  if (filePath.endsWith('.jsx') || filePath.endsWith('.js')) return 'javascript'
-  if (filePath.endsWith('.json')) return 'json'
-  if (filePath.endsWith('.md')) return 'markdown'
-  if (filePath.endsWith('.css')) return 'css'
-  if (filePath.endsWith('.html')) return 'html'
-  if (filePath.endsWith('.py')) return 'python'
-  return 'plaintext'
-}
+export { languageFromPath }
 
 /** 将 unified patch 还原为修改前/后文本 */
 export const splitPatchToSides = (
@@ -193,18 +185,23 @@ export const fetchReviewFiles = async (input: {
   prNumber?: string
   serverId: string | null
   enableGitClone?: boolean
+  branch?: string
+  workDir?: string
 }): Promise<{
   files: ReviewFileResult[]
   usedDemo: boolean
   reason?: string
   commitSha?: string
   workDir?: string
+  ephemeral?: boolean
   source?: 'mcp' | 'git' | 'demo'
 }> => {
   const errors: string[] = []
   const allowGit = input.enableGitClone !== false
+  // 配置了工作目录时优先走 Git 克隆，确保代码落到指定本地目录
+  const preferGitWorkDir = Boolean(input.workDir?.trim()) && allowGit
 
-  if (mcpRegistry.hasConnectedClient()) {
+  if (!preferGitWorkDir && mcpRegistry.hasConnectedClient()) {
     const parsed = parseGithubRepo(input.repoUrl)
     const available = await listConnectedToolNames(input.serverId)
 
@@ -295,16 +292,23 @@ export const fetchReviewFiles = async (input: {
   if (allowGit && input.repoUrl?.trim()) {
     try {
       const { fetchViaGitClone } = await import('./git-fetcher')
-      const cloned = await fetchViaGitClone(input.repoUrl.trim())
+      const cloned = await fetchViaGitClone(input.repoUrl.trim(), {
+        mcpServerId: input.serverId ?? undefined,
+        branch: input.branch,
+        workDir: input.workDir
+      })
       return {
         files: cloned.files,
         usedDemo: false,
         source: 'git',
         commitSha: cloned.commitSha,
         workDir: cloned.workDir,
+        ephemeral: cloned.ephemeral,
         reason: errors.length
           ? `MCP 不可用，已通过 Git 克隆拉取（${errors[0]}）`
-          : '已通过 Git 克隆拉取'
+          : input.workDir?.trim()
+            ? `已克隆到工作目录 ${cloned.workDir}`
+            : '已通过 Git 克隆拉取'
       }
     } catch (error) {
       errors.push(`Git: ${error instanceof Error ? error.message : String(error)}`)
