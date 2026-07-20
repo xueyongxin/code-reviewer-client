@@ -491,7 +491,7 @@ export interface ElectronAPI {
     mcpServerId?: string
     filePath: string
     content: string
-  }) => Promise<{ ok: boolean; filePath: string }>
+  }) => Promise<{ ok: boolean; filePath: string; localCacheOnly: true }>
   openLocalFolder: () => Promise<{
     rootPath: string
     rootLabel: string
@@ -610,7 +610,7 @@ export interface ElectronAPI {
     authorizeUrl: string
     state: string
   }>
-  cloudOpenAccountManage: () => Promise<{
+  cloudOpenAccountManage: (nextPath?: string) => Promise<{
     opened: boolean
     url: string
   }>

@@ -297,11 +297,13 @@ export const cloudStartBrowserLogin = async (): Promise<BrowserLoginResult> => {
 const ACCOUNT_CONSOLE_PATH = '/account'
 
 /**
- * 打开服务后台「个人账号设置」：
+ * 打开服务后台控制台路径（handoff 免登）：
  * - 桌面已登录：签发网页交接码，浏览器免登进入
- * - 否则：打开登录页，登录后跳转账号设置
+ * - 否则：打开登录页，登录后跳转目标页
  */
-export const cloudOpenAccountManage = async (): Promise<{
+export const cloudOpenConsolePath = async (
+  nextPath = ACCOUNT_CONSOLE_PATH
+): Promise<{
   opened: boolean
   url: string
 }> => {
@@ -313,7 +315,7 @@ export const cloudOpenAccountManage = async (): Promise<{
     /\/$/,
     ''
   )
-  const next = ACCOUNT_CONSOLE_PATH
+  const next = nextPath.startsWith('/') ? nextPath : `/${nextPath}`
 
   if (cloud.accessToken) {
     try {
@@ -340,6 +342,12 @@ export const cloudOpenAccountManage = async (): Promise<{
   await shell.openExternal(url)
   return { opened: true, url }
 }
+
+/** 打开服务后台「个人账号设置」 */
+export const cloudOpenAccountManage = async (): Promise<{
+  opened: boolean
+  url: string
+}> => cloudOpenConsolePath(ACCOUNT_CONSOLE_PATH)
 
 /** 处理 codereviewer://auth/callback?code=&state= */
 export const cloudHandleAuthCallback = async (rawUrl: string): Promise<AppConfig> => {
@@ -586,7 +594,7 @@ export const cloudUploadLatestReport = async (): Promise<{ id: string }> => {
       prNumber: report.prNumber,
       commitSha: report.commitSha,
       status: report.status,
-      visibility: 'org',
+      visibility: 'private',
       issueCount: report.issues?.length ?? 0,
       totalDurationMs: report.totalDurationMs,
       summary: report.summaryMarkdown?.slice(0, 500),
@@ -749,7 +757,7 @@ export const maybeAutoUploadReport = async (report: ReviewReport): Promise<void>
         prNumber: report.prNumber,
         commitSha: report.commitSha,
         status: report.status,
-        visibility: 'org',
+        visibility: 'private',
         issueCount: report.issues?.length ?? 0,
         totalDurationMs: report.totalDurationMs,
         summary: report.summaryMarkdown?.slice(0, 500),

@@ -33,7 +33,7 @@ interface AppState {
   disconnectMcp: (serverId: string) => Promise<void>
   startReview: (payload: StartReviewPayload) => Promise<void>
   startBatchReview: (payloads: StartReviewPayload[]) => Promise<ReviewReport[]>
-  cancelReview: () => Promise<void>
+  cancelReview: (reportId?: string) => Promise<void>
   postPrComments: (payload: PostPrCommentsPayload) => Promise<{
     posted: number
     failed: number
@@ -169,12 +169,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  cancelReview: async () => {
-    const id = get().currentReport?.id
+  cancelReview: async (reportId) => {
     if (get().batchRunning) {
       await window.electronAPI.cancelReview('')
       return
     }
+    const id = reportId || get().currentReport?.id
     if (!id) return
     await window.electronAPI.cancelReview(id)
   },
@@ -213,7 +213,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   loadReport: async (reportId) => {
     const report = await window.electronAPI.getReportById(reportId)
-    if (report) set({ currentReport: report })
+    if (!report) {
+      throw new Error('报告不存在或已删除')
+    }
+    set({ currentReport: report })
   },
 
   deleteReport: async (reportId) => {

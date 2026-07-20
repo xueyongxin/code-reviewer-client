@@ -417,13 +417,16 @@ export const readRepoFile = async (payload: {
   }
 }
 
+/**
+ * 远程仓写盘仅落本地 temp clone，明确告知调用方。
+ */
 export const writeRepoFile = async (payload: {
   repoUrl: string
   branch?: string
   mcpServerId?: string
   filePath: string
   content: string
-}): Promise<{ ok: boolean; filePath: string }> => {
+}): Promise<{ ok: boolean; filePath: string; localCacheOnly: true }> => {
   const repoUrl = payload.repoUrl?.trim()
   const filePath = payload.filePath?.replace(/^\/+/, '').replace(/\\/g, '/')
   if (!repoUrl) throw new Error('未配置仓库地址')
@@ -439,7 +442,7 @@ export const writeRepoFile = async (payload: {
 
   mkdirSync(dirname(abs), { recursive: true })
   writeFileSync(abs, payload.content, 'utf-8')
-  return { ok: true, filePath }
+  return { ok: true, filePath, localCacheOnly: true }
 }
 
 export const createRepoDir = async (payload: {

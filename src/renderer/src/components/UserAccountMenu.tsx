@@ -12,7 +12,8 @@ import {
   BugOutlined,
   MobileOutlined,
   DownOutlined,
-  CheckOutlined
+  CheckOutlined,
+  CloudDownloadOutlined
 } from '@ant-design/icons'
 import { useAppStore } from '../store/useAppStore'
 import { useAppearance } from '../prefs/AppearanceProvider'
@@ -37,6 +38,7 @@ const UserAccountMenu = ({
   initials
 }: Props): JSX.Element => {
   const saveConfig = useAppStore((s) => s.saveConfig)
+  const checkForUpdates = useAppStore((s) => s.checkForUpdates)
   const { t, themeMode, locale, setThemeMode, setLocale } = useAppearance()
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -190,16 +192,40 @@ const UserAccountMenu = ({
                 </div>
               </div>
             </div>
-            <div className="user-menu-credit" title="权益额度">
+            <div className="user-menu-credit" title={locale === 'en-US' ? 'Quota (see Subscription in console)' : '额度请在网页「订阅管理」查看'}>
               <ThunderboltOutlined />
-              <span>0</span>
+              <span>—</span>
             </div>
           </div>
 
           <button
             type="button"
             className="user-menu-upgrade"
-            onClick={() => soon(t('menu.upgrade'))}
+            disabled={busy}
+            onClick={() => {
+              void (async () => {
+                setBusy(true)
+                try {
+                  await window.electronAPI.cloudOpenAccountManage('/subscription')
+                  message.info(
+                    locale === 'en-US'
+                      ? 'Opened subscription in browser'
+                      : '已在浏览器打开订阅管理'
+                  )
+                  close()
+                } catch (e) {
+                  message.error(
+                    e instanceof Error
+                      ? e.message
+                      : locale === 'en-US'
+                        ? 'Unable to open subscription'
+                        : '无法打开订阅管理'
+                  )
+                } finally {
+                  setBusy(false)
+                }
+              })()
+            }}
           >
             <ThunderboltOutlined />
             {t('menu.upgrade')}
@@ -305,6 +331,49 @@ const UserAccountMenu = ({
               <span className="user-menu-item-left">
                 <SettingOutlined />
                 {t('menu.settings')}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="user-menu-item"
+              disabled={busy}
+              onClick={() => {
+                void (async () => {
+                  setBusy(true)
+                  try {
+                    const result = await checkForUpdates()
+                    if (result.updateAvailable) {
+                      message.success(
+                        locale === 'en-US'
+                          ? `Update available: ${result.latestVersion || ''} (${result.currentVersion})`
+                          : `发现新版本 ${result.latestVersion || ''}（当前 ${result.currentVersion}）`
+                      )
+                    } else {
+                      message.info(
+                        result.message ||
+                          (locale === 'en-US'
+                            ? 'You are up to date'
+                            : '已是最新版本')
+                      )
+                    }
+                    close()
+                  } catch (e) {
+                    message.error(
+                      e instanceof Error
+                        ? e.message
+                        : locale === 'en-US'
+                          ? 'Update check failed'
+                          : '检查更新失败'
+                    )
+                  } finally {
+                    setBusy(false)
+                  }
+                })()
+              }}
+            >
+              <span className="user-menu-item-left">
+                <CloudDownloadOutlined />
+                {locale === 'en-US' ? 'Check for updates' : '检查更新'}
               </span>
             </button>
             <button

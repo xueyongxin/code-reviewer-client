@@ -4,12 +4,14 @@ import {
   AppstoreOutlined,
   ArrowUpOutlined,
   CheckOutlined,
+  CloseOutlined,
   CommentOutlined,
   CopyOutlined,
   DeleteOutlined,
   DislikeOutlined,
   DownOutlined,
   EllipsisOutlined,
+  FileTextOutlined,
   LikeOutlined,
   PaperClipOutlined,
   PlusOutlined,
@@ -47,6 +49,29 @@ const estimateDurationLabel = (messages: ChatMessage[]): string | null => {
   if (!Number.isFinite(ms) || ms < 0) return null
   const sec = Math.max(1, Math.round(ms / 1000))
   return `任务耗时 ${sec}s`
+}
+
+/** 从用户消息正文拆出附件块（入库仍保留全文供 LLM） */
+const ATTACH_BLOCK_RE =
+  /【附件\s+([^】]+)】\s*\n```[^\n]*\n([\s\S]*?)```/g
+
+const splitUserMessageContent = (
+  content: string
+): { text: string; attachments: Array<{ name: string; body: string }> } => {
+  const attachments: Array<{ name: string; body: string }> = []
+  let m: RegExpExecArray | null
+  const re = new RegExp(ATTACH_BLOCK_RE.source, 'g')
+  while ((m = re.exec(content)) !== null) {
+    attachments.push({ name: m[1].trim(), body: m[2] })
+  }
+  const text = content.replace(new RegExp(ATTACH_BLOCK_RE.source, 'g'), '').trim()
+  return { text, attachments }
+}
+
+const fileExtLabel = (name: string): string => {
+  const i = name.lastIndexOf('.')
+  if (i <= 0 || i === name.length - 1) return 'file'
+  return name.slice(i + 1).toLowerCase()
 }
 
 const ThinkingBlock = ({
@@ -122,7 +147,19 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
   const [commands, setCommands] = useState<ChatCommandDef[]>([])
   const [cmdOpen, setCmdOpen] = useState(false)
   const [cmdIndex, setCmdIndex] = useState(0)
-  const [feedback, setFeedback] = useState<Record<string, 'up' | 'down'>>({})
+  const [feedback, setFeedback] = useState<Record<string, 'up' | 'down'>>(() => {
+    try {
+      const raw = localStorage.getItem('cr.chatFeedback')
+      if (!raw) return {}
+      const parsed = JSON.parse(raw) as Record<string, 'up' | 'down'>
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  })
+  const [attachments, setAttachments] = useState<
+    Array<{ id: string; name: string; content: string }>
+  >([])
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -519,19 +556,30 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
 
   const attachFiles = async (files: FileList | null): Promise<void> => {
     if (!files?.length) return
-    const parts: string[] = []
+    const next: Array<{ id: string; name: string; content: string }> = []
     for (const file of Array.from(files).slice(0, 5)) {
       if (file.size > 200 * 1024) {
         message.warning(`${file.name} 超过 200KB，已跳过`)
         continue
       }
       const text = await file.text()
-      parts.push(`【附件 ${file.name}】\n\`\`\`\n${text.slice(0, 12000)}\n\`\`\``)
+      next.push({
+        id: `${Date.now()}-${file.name}-${Math.random().toString(16).slice(2, 8)}`,
+        name: file.name,
+        content: text.slice(0, 12000)
+      })
     }
-    if (!parts.length) return
-    setDraft((prev) => (prev ? `${prev}\n\n${parts.join('\n\n')}` : parts.join('\n\n')))
-    message.success(`已附加 ${parts.length} 个文件到输入框`)
+    if (!next.length) return
+    setAttachments((prev) => [...prev, ...next].slice(0, 5))
+    message.success(`已附加 ${next.length} 个文件`)
   }
+
+  const formatAttachmentsBlock = (
+    items: Array<{ name: string; content: string }>
+  ): string =>
+    items
+      .map((a) => `【附件 ${a.name}】\n\`\`\`\n${a.content}\n\`\`\``)
+      .join('\n\n')
 
   const applyCommand = async (cmd: ChatCommandDef, args = ''): Promise<void> => {
     setCmdOpen(false)
@@ -545,10 +593,11 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
   }
 
   const handleSend = async (): Promise<void> => {
-    const content = draft.trim()
-    if (!content || sending) return
+    const text = draft.trim()
+    const pendingAttachments = attachments
+    if ((!text && pendingAttachments.length === 0) || sending) return
 
-    const parsed = parseSlashInput(content)
+    const parsed = text ? parseSlashInput(text) : null
     if (parsed) {
       const cmd = matchCommand(commands, parsed.slash)
       if (cmd) {
@@ -559,6 +608,9 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
       return
     }
 
+    const attachmentBlock = formatAttachmentsBlock(pendingAttachments)
+    const content = [text, attachmentBlock].filter(Boolean).join('\n\n')
+    setAttachments([])
     await sendContent(content)
   }
 
@@ -620,9 +672,44 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
           <div className="chat-messages">
             {(active?.messages ?? []).map((msg, idx) => {
               if (msg.role === 'user') {
+                const { text, attachments: msgAttachments } = splitUserMessageContent(
+                  msg.content
+                )
                 return (
                   <div key={msg.id} className="chat-row user">
-                    <div className="chat-user-bubble">{msg.content}</div>
+                    <div className="chat-user-stack">
+                      {msgAttachments.map((a, i) => (
+                        <button
+                          key={`${msg.id}-att-${i}`}
+                          type="button"
+                          className="chat-user-file-card"
+                          title="查看附件内容"
+                          onClick={() => {
+                            Modal.info({
+                              title: a.name,
+                              width: 560,
+                              content: (
+                                <pre className="chat-attach-preview">{a.body}</pre>
+                              ),
+                              okText: '关闭'
+                            })
+                          }}
+                        >
+                          <span className="chat-user-file-icon" aria-hidden>
+                            <FileTextOutlined />
+                          </span>
+                          <span className="chat-user-file-meta">
+                            <span className="chat-user-file-name">{a.name}</span>
+                            <span className="chat-user-file-ext">{fileExtLabel(a.name)}</span>
+                          </span>
+                        </button>
+                      ))}
+                      {text ? (
+                        <div className="chat-user-bubble">
+                          <div className="chat-user-text">{text}</div>
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 )
               }
@@ -662,7 +749,15 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
                         className={`chat-action-btn ${feedback[msg.id] === 'up' ? 'is-on' : ''}`}
                         title="有用"
                         onClick={() => {
-                          setFeedback((f) => ({ ...f, [msg.id]: 'up' }))
+                          setFeedback((f) => {
+                            const next = { ...f, [msg.id]: 'up' as const }
+                            try {
+                              localStorage.setItem('cr.chatFeedback', JSON.stringify(next))
+                            } catch {
+                              // ignore quota
+                            }
+                            return next
+                          })
                           message.success('已记录反馈')
                         }}
                       >
@@ -673,7 +768,15 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
                         className={`chat-action-btn ${feedback[msg.id] === 'down' ? 'is-on' : ''}`}
                         title="无用"
                         onClick={() => {
-                          setFeedback((f) => ({ ...f, [msg.id]: 'down' }))
+                          setFeedback((f) => {
+                            const next = { ...f, [msg.id]: 'down' as const }
+                            try {
+                              localStorage.setItem('cr.chatFeedback', JSON.stringify(next))
+                            } catch {
+                              // ignore quota
+                            }
+                            return next
+                          })
                           message.success('已记录反馈')
                         }}
                       >
@@ -727,6 +830,29 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
           </div>
         ) : null}
         <div className="chat-composer">
+          {attachments.length > 0 ? (
+            <div className="chat-attach-chips" aria-label="已附加文件">
+              {attachments.map((a) => (
+                <span key={a.id} className="chat-attach-chip">
+                  <PaperClipOutlined />
+                  <span className="chat-attach-chip-name" title={a.name}>
+                    {a.name}
+                  </span>
+                  <button
+                    type="button"
+                    className="chat-attach-chip-remove"
+                    title="移除附件"
+                    aria-label={`移除 ${a.name}`}
+                    onClick={() =>
+                      setAttachments((prev) => prev.filter((x) => x.id !== a.id))
+                    }
+                  >
+                    <CloseOutlined />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
           <textarea
             ref={inputRef}
             className="chat-composer-input"
@@ -881,8 +1007,8 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
               ) : (
                 <button
                   type="button"
-                  className={`chat-send ${draft.trim() ? 'ready' : ''}`}
-                  disabled={!draft.trim()}
+                  className={`chat-send ${draft.trim() || attachments.length ? 'ready' : ''}`}
+                  disabled={!draft.trim() && attachments.length === 0}
                   title="发送"
                   onClick={() => void handleSend()}
                 >

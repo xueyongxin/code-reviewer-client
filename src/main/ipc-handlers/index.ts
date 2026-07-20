@@ -66,6 +66,7 @@ import {
   cloudSetOrg,
   cloudStartBrowserLogin,
   cloudOpenAccountManage,
+  cloudOpenConsolePath,
   cloudRefreshProfile,
   cloudSyncEndpoints,
   cloudUploadLatestReport
@@ -579,9 +580,15 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
     return cloudStartBrowserLogin()
   })
 
-  ipcMain.handle(IPC_CHANNELS.CLOUD_OPEN_ACCOUNT_MANAGE, async () => {
-    return cloudOpenAccountManage()
-  })
+  ipcMain.handle(
+    IPC_CHANNELS.CLOUD_OPEN_ACCOUNT_MANAGE,
+    async (_event, nextPath?: string) => {
+      if (typeof nextPath === 'string' && nextPath.trim()) {
+        return cloudOpenConsolePath(nextPath.trim())
+      }
+      return cloudOpenAccountManage()
+    }
+  )
 
   ipcMain.handle(IPC_CHANNELS.CLOUD_REFRESH_PROFILE, async () =>
     toRendererConfig(await cloudRefreshProfile())

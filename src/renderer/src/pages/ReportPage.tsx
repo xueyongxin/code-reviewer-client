@@ -11,6 +11,7 @@ import {
   ArrowLeftOutlined,
   CheckCircleFilled,
   CloseCircleFilled,
+  CommentOutlined,
   DeleteOutlined,
   EllipsisOutlined,
   EyeOutlined,
@@ -142,12 +143,14 @@ const ReportPage = (): JSX.Element => {
   const config = useAppStore((s) => s.config)
   const loadReport = useAppStore((s) => s.loadReport)
   const deleteReport = useAppStore((s) => s.deleteReport)
+  const postPrComments = useAppStore((s) => s.postPrComments)
   const bootstrap = useAppStore((s) => s.bootstrap)
 
   const [activeFile, setActiveFile] = useState<string | null>(null)
   const [focusLine, setFocusLine] = useState<number | undefined>(undefined)
   const [activeIssueId, setActiveIssueId] = useState<string | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
+  const [detailLoadError, setDetailLoadError] = useState<string | null>(null)
   const [quickOpen, setQuickOpen] = useState(false)
   const [expandedDirs, setExpandedDirs] = useState<string[]>([])
   /** 本地工作区文件树（与 IDE 打开文件夹同源） */
@@ -161,6 +164,7 @@ const ReportPage = (): JSX.Element => {
   } | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [docSaving, setDocSaving] = useState(false)
+  const [postingPr, setPostingPr] = useState(false)
   /** 右键菜单目标：null 表示点在空白处 */
   const [ctxTarget, setCtxTarget] = useState<ExplorerCtxTarget>(null)
   const [leftWidth, setLeftWidth] = useState(() =>
@@ -231,15 +235,36 @@ const ReportPage = (): JSX.Element => {
   }, [history, listQuery, listStatus])
 
   useEffect(() => {
-    if (!detailId) return
-    if (currentReport?.id === detailId) {
+    if (!detailId) {
+      setDetailLoadError(null)
       setLoadingDetail(false)
       return
     }
+    if (currentReport?.id === detailId) {
+      setLoadingDetail(false)
+      setDetailLoadError(null)
+      return
+    }
+    let cancelled = false
     setLoadingDetail(true)
+    setDetailLoadError(null)
     void loadReport(detailId)
-      .catch((e) => message.error(e instanceof Error ? e.message : '加载报告失败'))
-      .finally(() => setLoadingDetail(false))
+      .then(() => {
+        if (!cancelled) setDetailLoadError(null)
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : '加载报告失败'
+        if (!cancelled) {
+          setDetailLoadError(msg)
+          message.error(msg)
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDetail(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [detailId, currentReport?.id, loadReport])
 
   useEffect(() => {
@@ -674,6 +699,52 @@ const ReportPage = (): JSX.Element => {
     }
   }
 
+  const onPostPrComments = (): void => {
+    if (!currentReport) return
+    if (!currentReport.prNumber?.trim()) {
+      message.warning('当前报告没有 PR 编号，无法回写')
+      return
+    }
+    const issueIds = currentReport.issues
+      .filter((i) => i.severity === 'error')
+      .map((i) => i.id)
+    if (!issueIds.length) {
+      message.info('没有可回写的错误问题')
+      return
+    }
+    Modal.confirm({
+      title: `回写 ${issueIds.length} 条错误到 PR #${currentReport.prNumber}`,
+      content:
+        '将通过已连接的 MCP，把错误作为行级评论发到 Pull Request。请确认 MCP 已连接且具备评论权限。',
+      okText: '回写',
+      cancelText: '取消',
+      onOk: async () => {
+        setPostingPr(true)
+        try {
+          const result = await postPrComments({
+            reportId: currentReport.id,
+            issueIds
+          })
+          if (result.posted > 0 && result.failed === 0) {
+            message.success(`已回写 ${result.posted} 条评论`)
+          } else {
+            message.warning(
+              `回写完成：成功 ${result.posted}，失败 ${result.failed}`
+            )
+          }
+          if (result.details?.length) {
+            console.info('[pr-comments]', result.details)
+          }
+        } catch (e) {
+          message.error(e instanceof Error ? e.message : '回写 PR 评论失败')
+          throw e
+        } finally {
+          setPostingPr(false)
+        }
+      }
+    })
+  }
+
   // —— 列表视图 ——
   if (!detailId) {
     if (history.length === 0) {
@@ -1012,6 +1083,25 @@ const ReportPage = (): JSX.Element => {
   }
 
   // —— 详情视图 ——
+  if (detailLoadError && (!currentReport || currentReport.id !== detailId)) {
+    return (
+      <div className="page">
+        <div className="page-head">
+          <div>
+            <p className="eyebrow">Records</p>
+            <h1 className="page-title">无法打开报告</h1>
+            <p className="page-sub" style={{ marginTop: 8 }}>
+              {detailLoadError}
+            </p>
+          </div>
+          <Button type="primary" icon={<ArrowLeftOutlined />} onClick={backToList}>
+            返回列表
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
   if (loadingDetail || !currentReport || currentReport.id !== detailId) {
     return (
       <div className="page">
@@ -1249,6 +1339,27 @@ const ReportPage = (): JSX.Element => {
                     </span>
                   ))
                 : null}
+              <Button
+                size="small"
+                className="rpt-pr-post-btn"
+                icon={<CommentOutlined />}
+                loading={postingPr}
+                disabled={
+                  currentReport.status === 'running' ||
+                  !currentReport.prNumber?.trim() ||
+                  errorCount === 0
+                }
+                title={
+                  !currentReport.prNumber?.trim()
+                    ? '报告无 PR 编号，无法回写'
+                    : errorCount === 0
+                      ? '没有错误可回写'
+                      : `回写错误到 PR #${currentReport.prNumber}`
+                }
+                onClick={onPostPrComments}
+              >
+                回写 PR
+              </Button>
             </div>
             {activeIssue ? (
               <div className={`rpt-focus is-inline is-${activeIssue.severity}`}>

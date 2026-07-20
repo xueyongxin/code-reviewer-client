@@ -125,7 +125,15 @@ type LastRunConfig = {
 
 const readFavoritePipelineIds = (): string[] => {
   try {
-    const raw = sessionStorage.getItem(FAVORITE_PIPELINES_KEY)
+    let raw = localStorage.getItem(FAVORITE_PIPELINES_KEY)
+    if (!raw) {
+      // 兼容旧版 sessionStorage
+      raw = sessionStorage.getItem(FAVORITE_PIPELINES_KEY)
+      if (raw) {
+        localStorage.setItem(FAVORITE_PIPELINES_KEY, raw)
+        sessionStorage.removeItem(FAVORITE_PIPELINES_KEY)
+      }
+    }
     if (!raw) return []
     const list = JSON.parse(raw) as unknown
     return Array.isArray(list) ? list.filter((x) => typeof x === 'string') : []
@@ -617,7 +625,7 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
     setFavoriteIds((prev) => {
       const fav = prev.filter((id) => !idSet.has(id))
       try {
-        sessionStorage.setItem(FAVORITE_PIPELINES_KEY, JSON.stringify(fav))
+        localStorage.setItem(FAVORITE_PIPELINES_KEY, JSON.stringify(fav))
       } catch {
         /* ignore */
       }
@@ -882,6 +890,14 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
       message.warning('该流水线正在运行，请稍候')
       return
     }
+    if (
+      currentReport?.status === 'running' &&
+      currentReport.pipelineId &&
+      currentReport.pipelineId !== pipeline.id
+    ) {
+      message.warning('其他流水线正在运行，请稍候或先取消后再启动')
+      return
+    }
     if (!(await assertPipelineReady(pipeline))) return
 
     const saved = readLastRunConfigMap()[pipeline.id]
@@ -986,13 +1002,13 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
     setNameDraft(active?.name || '')
   }, [active?.id, active?.name])
 
-  const latestReportByRepo = useMemo(() => {
+  const latestReportByPipeline = useMemo(() => {
     const map = new Map<string, (typeof history)[number]>()
     const sorted = [...history].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     )
     for (const report of sorted) {
-      const key = report.repoUrl?.trim()
+      const key = report.pipelineId?.trim()
       if (!key || map.has(key)) continue
       map.set(key, report)
     }
@@ -1018,7 +1034,7 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
         ? prev.filter((id) => id !== pipelineId)
         : [...prev, pipelineId]
       try {
-        sessionStorage.setItem(FAVORITE_PIPELINES_KEY, JSON.stringify(next))
+        localStorage.setItem(FAVORITE_PIPELINES_KEY, JSON.stringify(next))
       } catch {
         /* ignore */
       }
@@ -1273,20 +1289,19 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
                   <button
                     type="button"
                     className="pipe-mine-icon-btn"
-                    title="列表"
-                    aria-label="列表"
+                    title="详细列表"
+                    aria-label="详细列表"
+                    onClick={() => setPipeListView('detail')}
                   >
                     <UnorderedListOutlined />
                   </button>
                   <button
                     type="button"
                     className="pipe-mine-icon-btn"
-                    title="筛选"
-                    aria-label="筛选"
+                    title="我的收藏"
+                    aria-label="我的收藏"
                     onClick={() =>
-                      message.info(
-                        pipeListTab === 'favorites' ? '当前为收藏视图' : '可切换到「我的收藏」筛选'
-                      )
+                      setPipeListTab((tab) => (tab === 'favorites' ? 'joined' : 'favorites'))
                     }
                   >
                     <FilterOutlined />
@@ -1409,9 +1424,7 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
                 ) : (
                   filteredHomePipelines.map((p, index) => {
                     const title = p.name || shortRepo(p.repoUrl) || '未命名流水线'
-                    const report = p.repoUrl.trim()
-                      ? latestReportByRepo.get(p.repoUrl.trim())
-                      : undefined
+                    const report = latestReportByPipeline.get(p.id)
                     const starred = favoriteIds.includes(p.id)
                     const statusIcon =
                       report?.status === 'completed' ? (
@@ -1636,13 +1649,15 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
     if (next === active.name) return
     void updateActive({ name: next })
   }
-  const relatedReport =
-    currentReport &&
-    (!currentReport.repoUrl ||
-      !active.repoUrl ||
-      shortRepo(currentReport.repoUrl) === shortRepo(active.repoUrl))
+  /** 仅当「当前看板流水线」在跑时才显示取消/进度，避免全局 loading 串台 */
+  const activeRunReport =
+    currentReport?.status === 'running' &&
+    currentReport.pipelineId === active.id
       ? currentReport
-      : null
+      : history.find(
+          (r) => r.pipelineId === active.id && r.status === 'running'
+        ) ?? null
+  const activePipelineRunning = Boolean(activeRunReport)
 
   /** 配置页 → 只读运行页（右侧「编辑 / 运行」） */
   const goToRunPage = (): void => {
@@ -1650,13 +1665,14 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
   }
 
   const handleSaveOnly = (): void => {
-    // 配置已随表单实时写入；仅保存 = 落库确认后进入不可编辑页
+    commitPipelineName()
     message.success('已保存')
     goToRunPage()
   }
 
   const handleSaveAndRun = (): void => {
     if (!active) return
+    commitPipelineName()
     if (!isPipelineReady(active)) {
       message.warning('请先完成代码源、审查方式、模型与报告配置')
       return
@@ -1985,16 +2001,37 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
             onPressEnter={(e) => (e.target as HTMLInputElement).blur()}
           />
           <div className="pipe-ws-tabs" role="tablist">
-            <span className="pipe-ws-tab is-disabled">基本信息</span>
+            <button
+              type="button"
+              className="pipe-ws-tab is-disabled"
+              title="即将开放"
+              onClick={() => message.info('「基本信息」即将开放')}
+            >
+              基本信息
+            </button>
             <button type="button" className="pipe-ws-tab active" role="tab">
               流程配置
             </button>
-            <span className="pipe-ws-tab is-disabled">触发设置</span>
-            <span className="pipe-ws-tab is-disabled">变量和缓存</span>
+            <button
+              type="button"
+              className="pipe-ws-tab is-disabled"
+              title="即将开放"
+              onClick={() => message.info('「触发设置」即将开放')}
+            >
+              触发设置
+            </button>
+            <button
+              type="button"
+              className="pipe-ws-tab is-disabled"
+              title="即将开放"
+              onClick={() => message.info('「变量和缓存」即将开放')}
+            >
+              变量和缓存
+            </button>
           </div>
           <div className="pipe-ws-actions">
             <Button onClick={handleSaveOnly}>仅保存</Button>
-            <Button type="primary" loading={loading} onClick={handleSaveAndRun}>
+            <Button type="primary" loading={activePipelineRunning} onClick={handleSaveAndRun}>
               保存并运行
             </Button>
           </div>
@@ -2034,12 +2071,15 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
           </div>
           <div className="pipe-ws-actions">
             <Button onClick={() => setBoardTab('config')}>编辑</Button>
-            {loading ? (
-              <Button danger onClick={() => void cancelReview()}>
+            {activePipelineRunning ? (
+              <Button
+                danger
+                onClick={() => void cancelReview(activeRunReport?.id)}
+              >
                 取消
               </Button>
             ) : (
-              <Button type="primary" loading={loading} onClick={handleRun}>
+              <Button type="primary" onClick={handleRun}>
                 运行
               </Button>
             )}
@@ -2047,11 +2087,10 @@ const Dashboard = ({ onOpenSettings }: DashboardProps): JSX.Element => {
         </header>
       )}
 
-      {boardTab !== 'history' &&
-      (loading || (relatedReport && relatedReport.status === 'running')) ? (
+      {boardTab !== 'history' && activePipelineRunning ? (
         <div className="pipe-run-thin-progress">
           <Progress
-            percent={relatedReport?.progress ?? 4}
+            percent={activeRunReport?.progress ?? 4}
             size="small"
             status="active"
             showInfo={false}

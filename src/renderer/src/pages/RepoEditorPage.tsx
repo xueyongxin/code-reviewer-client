@@ -543,6 +543,12 @@ const RepoEditorPage = (): JSX.Element => {
           filePath: tab.path,
           content: tab.content
         })
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.path === tab.path ? { ...t, savedContent: t.content } : t
+          )
+        )
+        message.success('已保存')
       } else {
         if (!repoUrl?.trim()) {
           message.warning('请先选择工作区或者打开项目后再保存')
@@ -555,13 +561,13 @@ const RepoEditorPage = (): JSX.Element => {
           filePath: tab.path,
           content: tab.content
         })
-      }
-      setTabs((prev) =>
-        prev.map((t) =>
-          t.path === tab.path ? { ...t, savedContent: t.content } : t
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.path === tab.path ? { ...t, savedContent: t.content } : t
+          )
         )
-      )
-      message.success('已保存')
+        message.success('已保存到本地缓存（未推送到远程仓库）')
+      }
     } catch (e) {
       message.error(e instanceof Error ? e.message : '保存失败')
     }
@@ -1384,9 +1390,19 @@ const RepoEditorPage = (): JSX.Element => {
                     )
                   }}
                   statusLeft={
-                    branch ? (
-                      <span className="repo-status-item">⎇ {branch}</span>
-                    ) : null
+                    <>
+                      {branch ? (
+                        <span className="repo-status-item">⎇ {branch}</span>
+                      ) : null}
+                      {!localRoot && repoUrl?.trim() ? (
+                        <span
+                          className="repo-status-item"
+                          title="远程浏览模式：保存仅写入本机临时克隆目录，不会 push 到远端"
+                        >
+                          本地缓存
+                        </span>
+                      ) : null}
+                    </>
                   }
                 />
               )

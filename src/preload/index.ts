@@ -78,8 +78,8 @@ const api: ElectronAPI = {
     ipcRenderer.invoke(IPC_CHANNELS.CLOUD_REGISTER_PHONE, payload),
   cloudStartBrowserLogin: () =>
     ipcRenderer.invoke(IPC_CHANNELS.CLOUD_START_BROWSER_LOGIN),
-  cloudOpenAccountManage: () =>
-    ipcRenderer.invoke(IPC_CHANNELS.CLOUD_OPEN_ACCOUNT_MANAGE),
+  cloudOpenAccountManage: (nextPath?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CLOUD_OPEN_ACCOUNT_MANAGE, nextPath),
   onCloudAuthComplete: (callback) => {
     const listener = (
       _event: IpcRendererEvent,

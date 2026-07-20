@@ -116,6 +116,7 @@ export const prFilesToReviewFiles = (text: string): ReviewFileResult[] => {
     })
 }
 
+/** 仅供联调/文档演示脚本显式调用；生产拉码失败不得回退到此数据 */
 export const demoFilesForRepo = (repoUrl: string): ReviewFileResult[] => {
   const originalTs = `// demo file for ${repoUrl}
 export const hello = () => {
@@ -194,7 +195,7 @@ export const fetchReviewFiles = async (input: {
   commitSha?: string
   workDir?: string
   ephemeral?: boolean
-  source?: 'mcp' | 'git' | 'demo'
+  source?: 'mcp' | 'git'
 }> => {
   const errors: string[] = []
   const allowGit = input.enableGitClone !== false
@@ -315,12 +316,10 @@ export const fetchReviewFiles = async (input: {
     }
   }
 
-  return {
-    files: demoFilesForRepo(input.repoUrl),
-    usedDemo: true,
-    source: 'demo',
-    reason: `拉码失败，已回退演示数据（${errors[0] ?? '未知原因'}）`
-  }
+  const detail = errors.filter(Boolean).slice(0, 3).join('；') || '未知原因'
+  throw new Error(
+    `拉码失败，已终止审查（不再使用演示数据）。${detail}`
+  )
 }
 
 export const DEFAULT_PR_COMMENT_TOOLS = [

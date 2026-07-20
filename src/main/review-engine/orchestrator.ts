@@ -264,7 +264,7 @@ export class ReviewOrchestrator {
 
       // ② 拉取代码
       emitFlow(
-        flow.begin('fetch', '② 拉取代码', '尝试 MCP → Git 克隆 → 演示回退'),
+        flow.begin('fetch', '② 拉取代码', '尝试 MCP → Git 克隆'),
         { progress: 12, progressLabel: '② 拉取代码中…' }
       )
       assertNotCancelled()
@@ -289,7 +289,7 @@ export class ReviewOrchestrator {
         file.language = file.language || languageFromPath(file.filePath)
       }
 
-      const pullSource = fetched.source ?? (fetched.usedDemo ? 'demo' : 'mcp')
+      const pullSource = fetched.source ?? 'mcp'
       emitFlow(
         flow.end(
           'fetch',
