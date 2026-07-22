@@ -1,4 +1,5 @@
 import Store from 'electron-store'
+import { app } from 'electron'
 import type {
   AppConfig,
   ExternalAppConnection,
@@ -28,6 +29,28 @@ import {
   mergeEnvMaps,
   mergeSecretField
 } from './secrets'
+
+const PROD_API_BASE = 'https://forensic.waminet.com'
+const PROD_AUTH_WEB_BASE = 'https://forensic.waminet.com'
+const DEV_API_BASE = 'http://localhost:3100'
+const DEV_AUTH_WEB_BASE = 'http://localhost:3000'
+
+const defaultCloudApiBase = (): string =>
+  app.isPackaged ? PROD_API_BASE : DEV_API_BASE
+const defaultCloudAuthWebBase = (): string =>
+  app.isPackaged ? PROD_AUTH_WEB_BASE : DEV_AUTH_WEB_BASE
+
+const isLocalHostUrl = (url: string): boolean =>
+  /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(url.trim())
+
+const normalizeCloudBase = (
+  stored: string | undefined,
+  fallback: string
+): string => {
+  const base = (stored || fallback).replace(/\/$/, '')
+  if (app.isPackaged && isLocalHostUrl(base)) return fallback
+  return base
+}
 
 const isDiskEncrypted = (value?: string): boolean =>
   !!value &&
@@ -103,8 +126,8 @@ const defaults: AppConfig = {
   enableMemoryCloudSync: false,
   batchReviewConcurrency: DEFAULT_BATCH_REVIEW_CONCURRENCY,
   cloud: {
-    apiBase: 'http://localhost:3100',
-    authWebBase: 'http://localhost:3000',
+    apiBase: DEV_API_BASE,
+    authWebBase: DEV_AUTH_WEB_BASE,
     autoUploadReports: false
   },
   externalApps: {
@@ -271,8 +294,11 @@ const normalizeConfig = (raw: AppConfig): AppConfig => {
       raw.batchReviewConcurrency ?? DEFAULT_BATCH_REVIEW_CONCURRENCY
     ),
     cloud: {
-      apiBase: raw.cloud?.apiBase || 'http://localhost:3100',
-      authWebBase: raw.cloud?.authWebBase || 'http://localhost:3000',
+      apiBase: normalizeCloudBase(raw.cloud?.apiBase, defaultCloudApiBase()),
+      authWebBase: normalizeCloudBase(
+        raw.cloud?.authWebBase,
+        defaultCloudAuthWebBase()
+      ),
       accessToken: raw.cloud?.accessToken || '',
       refreshToken: raw.cloud?.refreshToken || '',
       user: raw.cloud?.user,

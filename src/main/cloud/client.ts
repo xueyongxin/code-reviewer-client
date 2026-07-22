@@ -1,4 +1,4 @@
-import { shell } from 'electron'
+import { app, shell } from 'electron'
 import { randomUUID } from 'crypto'
 import type { AppConfig, CloudAccountConfig, ReviewReport } from '../../shared/types'
 import { getAppConfig, saveAppConfig } from '../config/store'
@@ -12,16 +12,46 @@ type ApiEnvelope<T> = {
   data: T
 }
 
-const DEFAULT_API_BASE = 'http://localhost:3100'
-const DEFAULT_AUTH_WEB_BASE = 'http://localhost:3000'
+const PROD_API_BASE = 'https://forensic.waminet.com'
+const PROD_AUTH_WEB_BASE = 'https://forensic.waminet.com'
+const DEV_API_BASE = 'http://localhost:3100'
+const DEV_AUTH_WEB_BASE = 'http://localhost:3000'
+
+const isLocalHostUrl = (url: string): boolean =>
+  /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(url.trim())
+
+const defaultApiBase = (): string => {
+  const fromEnv = process.env.CR_API_BASE?.trim()
+  if (fromEnv) return fromEnv.replace(/\/$/, '')
+  return (app.isPackaged ? PROD_API_BASE : DEV_API_BASE).replace(/\/$/, '')
+}
+
+const defaultAuthWebBase = (): string => {
+  const fromEnv = process.env.CR_AUTH_WEB_BASE?.trim()
+  if (fromEnv) return fromEnv.replace(/\/$/, '')
+  return (app.isPackaged ? PROD_AUTH_WEB_BASE : DEV_AUTH_WEB_BASE).replace(/\/$/, '')
+}
+
+/** 打包版若配置仍是 localhost，强制改用正式环境，避免授权跳本机 */
+const resolveApiBase = (stored?: string): string => {
+  const base = (stored || defaultApiBase()).replace(/\/$/, '')
+  if (app.isPackaged && isLocalHostUrl(base)) return defaultApiBase()
+  return base
+}
+
+const resolveAuthWebBase = (stored?: string): string => {
+  const base = (stored || defaultAuthWebBase()).replace(/\/$/, '')
+  if (app.isPackaged && isLocalHostUrl(base)) return defaultAuthWebBase()
+  return base
+}
 
 /** 当前等待网页回调的 state */
 let pendingBrowserAuthState: string | null = null
 
 const cloudOf = (config?: AppConfig): CloudAccountConfig =>
   config?.cloud ?? {
-    apiBase: DEFAULT_API_BASE,
-    authWebBase: DEFAULT_AUTH_WEB_BASE,
+    apiBase: defaultApiBase(),
+    authWebBase: defaultAuthWebBase(),
     autoUploadReports: false
   }
 
@@ -34,7 +64,7 @@ async function apiRequest<T>(
     apiBase?: string
   } = {}
 ): Promise<T> {
-  const base = (options.apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
+  const base = (options.apiBase || defaultApiBase()).replace(/\/$/, '')
   const headers: Record<string, string> = {
     'Content-Type': 'application/json'
   }
@@ -63,7 +93,7 @@ export const cloudLogin = async (input: {
   password: string
   apiBase?: string
 }): Promise<AppConfig> => {
-  const apiBase = (input.apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
+  const apiBase = resolveApiBase(input.apiBase)
   const data = await apiRequest<{
     accessToken: string
     refreshToken: string
@@ -154,7 +184,7 @@ export const cloudRefreshProfile = async (): Promise<AppConfig> => {
   if (!cloud.accessToken) {
     throw new Error('未登录云端账号')
   }
-  const apiBase = (cloud.apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
+  const apiBase = resolveApiBase(cloud.apiBase)
   const profile = await fetchCloudProfile(apiBase, cloud.accessToken)
   if (!profile) {
     throw new Error('获取用户资料失败')
@@ -168,7 +198,7 @@ export const cloudRefreshProfile = async (): Promise<AppConfig> => {
 /** 从服务端拉取桌面端入口地址（公开接口） */
 export const cloudSyncEndpoints = async (): Promise<AppConfig> => {
   const config = getAppConfig()
-  const bootstrapBase = (cloudOf(config).apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
+  const bootstrapBase = resolveApiBase(cloudOf(config).apiBase)
   try {
     const data = await apiRequest<{
       apiBase?: string
@@ -176,8 +206,8 @@ export const cloudSyncEndpoints = async (): Promise<AppConfig> => {
       updateFeedUrl?: string
     }>('/api/v1/public/client-config', { apiBase: bootstrapBase })
     const nextCloud = await persistCloud({
-      apiBase: (data.apiBase || bootstrapBase).replace(/\/$/, ''),
-      authWebBase: (data.authWebBase || DEFAULT_AUTH_WEB_BASE).replace(/\/$/, '')
+      apiBase: resolveApiBase(data.apiBase || bootstrapBase),
+      authWebBase: resolveAuthWebBase(data.authWebBase || defaultAuthWebBase())
     })
     // 更新源写入应用配置（配置中心权威）
     if (typeof data.updateFeedUrl === 'string') {
@@ -190,13 +220,10 @@ export const cloudSyncEndpoints = async (): Promise<AppConfig> => {
     }
     return nextCloud
   } catch {
-    // 离线时沿用本地/默认地址
+    // 离线时沿用地址；打包版不会回落到 localhost
     return persistCloud({
       apiBase: bootstrapBase,
-      authWebBase: (cloudOf(config).authWebBase || DEFAULT_AUTH_WEB_BASE).replace(
-        /\/$/,
-        ''
-      )
+      authWebBase: resolveAuthWebBase(cloudOf(config).authWebBase)
     })
   }
 }
@@ -238,7 +265,7 @@ export const cloudExchangeDesktopCode = async (
   }
 
   const config = getAppConfig()
-  const apiBase = (cloudOf(config).apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
+  const apiBase = resolveApiBase(cloudOf(config).apiBase)
   const data = await apiRequest<{
     accessToken: string
     refreshToken: string
@@ -257,10 +284,8 @@ export const cloudExchangeDesktopCode = async (
 export const cloudStartBrowserLogin = async (): Promise<BrowserLoginResult> => {
   await cloudSyncEndpoints()
   const config = getAppConfig()
-  const apiBase = (cloudOf(config).apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
-  const authWebBase = (
-    cloudOf(config).authWebBase || DEFAULT_AUTH_WEB_BASE
-  ).replace(/\/$/, '')
+  const apiBase = resolveApiBase(cloudOf(config).apiBase)
+  const authWebBase = resolveAuthWebBase(cloudOf(config).authWebBase)
 
   const state = randomUUID()
   pendingBrowserAuthState = state
@@ -310,11 +335,8 @@ export const cloudOpenConsolePath = async (
   await cloudSyncEndpoints()
   const config = getAppConfig()
   const cloud = cloudOf(config)
-  const apiBase = (cloud.apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
-  const authWebBase = (cloud.authWebBase || DEFAULT_AUTH_WEB_BASE).replace(
-    /\/$/,
-    ''
-  )
+  const apiBase = resolveApiBase(cloud.apiBase)
+  const authWebBase = resolveAuthWebBase(cloud.authWebBase)
   const next = nextPath.startsWith('/') ? nextPath : `/${nextPath}`
 
   if (cloud.accessToken) {
@@ -374,7 +396,7 @@ export const cloudSendSms = async (input: {
   code: string
   expiresIn: number
 }> => {
-  const apiBase = (input.apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
+  const apiBase = resolveApiBase(input.apiBase)
   return apiRequest('/api/v1/auth/sms/send', {
     method: 'POST',
     apiBase,
@@ -387,7 +409,7 @@ export const cloudLoginPhone = async (input: {
   password: string
   apiBase?: string
 }): Promise<AppConfig> => {
-  const apiBase = (input.apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
+  const apiBase = resolveApiBase(input.apiBase)
   const data = await apiRequest<{
     accessToken: string
     refreshToken: string
@@ -405,7 +427,7 @@ export const cloudLoginSms = async (input: {
   code: string
   apiBase?: string
 }): Promise<AppConfig> => {
-  const apiBase = (input.apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
+  const apiBase = resolveApiBase(input.apiBase)
   const data = await apiRequest<{
     accessToken: string
     refreshToken: string
@@ -425,7 +447,7 @@ export const cloudRegister = async (input: {
   orgName?: string
   apiBase?: string
 }): Promise<AppConfig> => {
-  const apiBase = (input.apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
+  const apiBase = resolveApiBase(input.apiBase)
   const data = await apiRequest<{
     accessToken: string
     refreshToken: string
@@ -453,7 +475,7 @@ export const cloudRegisterPhone = async (input: {
   orgName?: string
   apiBase?: string
 }): Promise<AppConfig> => {
-  const apiBase = (input.apiBase || DEFAULT_API_BASE).replace(/\/$/, '')
+  const apiBase = resolveApiBase(input.apiBase)
   const data = await apiRequest<{
     accessToken: string
     refreshToken: string
@@ -489,7 +511,7 @@ export const cloudLogout = async (): Promise<AppConfig> => {
     }
   }
   return persistCloud({
-    apiBase: cloud.apiBase || DEFAULT_API_BASE,
+    apiBase: resolveApiBase(cloud.apiBase),
     accessToken: '',
     refreshToken: '',
     user: undefined,
@@ -622,7 +644,7 @@ export const cloudFetchMcpCatalog = async (q?: string): Promise<
   const cloud = cloudOf(getAppConfig())
   const qs = q ? `?q=${encodeURIComponent(q)}` : ''
   return apiRequest(`/api/v1/mcp-catalog${qs}`, {
-    apiBase: cloud.apiBase || DEFAULT_API_BASE,
+    apiBase: resolveApiBase(cloud.apiBase),
     token: cloud.accessToken
   })
 }
@@ -643,7 +665,7 @@ export const cloudFetchReviewMethods = async (
   const cloud = cloudOf(getAppConfig())
   const qs = q ? `?q=${encodeURIComponent(q)}` : ''
   return apiRequest(`/api/v1/review-methods${qs}`, {
-    apiBase: cloud.apiBase || DEFAULT_API_BASE
+    apiBase: resolveApiBase(cloud.apiBase)
   })
 }
 
@@ -665,7 +687,7 @@ export const cloudFetchCodeRepoCatalog = async (
   const cloud = cloudOf(getAppConfig())
   const qs = q ? `?q=${encodeURIComponent(q)}` : ''
   return apiRequest(`/api/v1/code-repo-catalog${qs}`, {
-    apiBase: cloud.apiBase || DEFAULT_API_BASE
+    apiBase: resolveApiBase(cloud.apiBase)
   })
 }
 
@@ -689,7 +711,7 @@ export const cloudFetchLlmCatalog = async (
   const cloud = cloudOf(getAppConfig())
   const qs = q ? `?q=${encodeURIComponent(q)}` : ''
   return apiRequest(`/api/v1/llm-catalog${qs}`, {
-    apiBase: cloud.apiBase || DEFAULT_API_BASE
+    apiBase: resolveApiBase(cloud.apiBase)
   })
 }
 
@@ -710,7 +732,7 @@ export const cloudFetchChatCommands = async (
   const cloud = cloudOf(getAppConfig())
   const qs = q ? `?q=${encodeURIComponent(q)}` : ''
   return apiRequest(`/api/v1/chat-commands${qs}`, {
-    apiBase: cloud.apiBase || DEFAULT_API_BASE
+    apiBase: resolveApiBase(cloud.apiBase)
   })
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "code-reviewer-client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "基于 MCP 的桌面端代码审查客户端",
   "main": "./out/main/index.js",
   "author": "",
