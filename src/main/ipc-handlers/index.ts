@@ -1,13 +1,15 @@
 import { execFile } from 'child_process'
-import { existsSync, statSync } from 'fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { dirname } from 'path'
 import { app, dialog, ipcMain, shell, type BrowserWindow } from 'electron'
 import { IPC_CHANNELS } from '../../shared/ipc'
 import type {
   AppConfig,
+  MemoryListQuery,
   PostPrCommentsPayload,
   SendChatPayload,
-  StartReviewPayload
+  StartReviewPayload,
+  UpsertMemoryInput
 } from '../../shared/types'
 import {
   getAppConfig,
@@ -17,9 +19,15 @@ import {
 } from '../config/store'
 import {
   deleteReviewReport,
+  deleteLlmMemory,
+  deleteOldestLlmMemories,
   getLatestReviewReport,
+  getLlmMemoryById,
+  listLlmMemories,
   listReviewReports,
-  getReviewReportById
+  getReviewReportById,
+  setLlmMemoryEnabled,
+  upsertLlmMemory
 } from '../database/db'
 import { mcpRegistry } from '../mcp-manager/registry'
 import { reviewOrchestrator } from '../review-engine/orchestrator'
@@ -28,6 +36,14 @@ import { postSelectedIssuesAsPrComments } from '../review-engine/pr-comments'
 import { checkAppUpdates } from '../updater'
 import { applyDocLlmConfig, buildDocDemoPayloads, loadDocDemoConfig } from '../review-engine/doc-demo'
 import { chatService } from '../review-engine/chat-service'
+import {
+  distillMemoriesFromChat,
+  exportMemoriesPayload,
+  importFromMemoryMcp,
+  importMemoriesPayload,
+  memoryStats,
+  upsertMemoryWithDedup
+} from '../review-engine/memory-service'
 import { listBranchesFromMcp, listReposFromMcp, warmMcpRepoCache } from '../review-engine/mcp-repos'
 import {
   createRepoDir,
@@ -513,6 +529,104 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
 
   ipcMain.handle(IPC_CHANNELS.CHAT_CANCEL, () => {
     chatService.cancelGeneration()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.MEMORY_LIST, (_event, query?: MemoryListQuery) => {
+    return listLlmMemories(query || {})
+  })
+
+  ipcMain.handle(IPC_CHANNELS.MEMORY_GET, (_event, id: string) => {
+    return getLlmMemoryById(id)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.MEMORY_UPSERT, (_event, input: UpsertMemoryInput) => {
+    // 新建走去重；带 id 的编辑保持精确更新，避免误合并到其它条目
+    if (input.id?.trim()) return upsertLlmMemory(input)
+    return upsertMemoryWithDedup(input).memory
+  })
+
+  ipcMain.handle(IPC_CHANNELS.MEMORY_DELETE, (_event, id: string) => {
+    deleteLlmMemory(id)
+  })
+
+  ipcMain.handle(
+    IPC_CHANNELS.MEMORY_SET_ENABLED,
+    (_event, id: string, enabled: boolean) => {
+      return setLlmMemoryEnabled(id, enabled)
+    }
+  )
+
+  ipcMain.handle(IPC_CHANNELS.MEMORY_STATS, () => {
+    return memoryStats()
+  })
+
+  ipcMain.handle(
+    IPC_CHANNELS.MEMORY_DISTILL_CHAT,
+    (_event, payload: { sessionId: string }) => {
+      const session = chatService.getSession(payload.sessionId)
+      if (!session) throw new Error('会话不存在')
+      const report = session.reportId
+        ? getReviewReportById(session.reportId)
+        : null
+      return distillMemoriesFromChat({
+        messages: session.messages,
+        repoUrl: report?.repoUrl,
+        force: true
+      })
+    }
+  )
+
+  ipcMain.handle(IPC_CHANNELS.MEMORY_CLEAR_OLDEST, (_event, count?: number) => {
+    const deleted = deleteOldestLlmMemories(
+      typeof count === 'number' && count > 0 ? count : 20
+    )
+    return { deleted, stats: memoryStats() }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.MEMORY_EXPORT, async () => {
+    const payload = exportMemoriesPayload()
+    const result = await dialog.showSaveDialog({
+      title: '导出记忆备份',
+      defaultPath: `code-reviewer-memories-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    })
+    if (result.canceled || !result.filePath) {
+      return { ok: false as const, canceled: true as const }
+    }
+    writeFileSync(result.filePath, JSON.stringify(payload, null, 2), 'utf-8')
+    return {
+      ok: true as const,
+      path: result.filePath,
+      count: payload.items.length
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.MEMORY_IMPORT, async () => {
+    const result = await dialog.showOpenDialog({
+      title: '导入记忆备份',
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    })
+    if (result.canceled || !result.filePaths?.[0]) {
+      return { ok: false as const, canceled: true as const }
+    }
+    let raw: unknown
+    try {
+      raw = JSON.parse(readFileSync(result.filePaths[0], 'utf-8')) as unknown
+    } catch {
+      throw new Error('无法解析备份文件，请选择有效的 JSON')
+    }
+    const stats = importMemoriesPayload(raw)
+    return {
+      ok: true as const,
+      ...stats,
+      memoryStats: memoryStats()
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.MEMORY_IMPORT_MCP, async () => {
+    const stats = await importFromMemoryMcp()
+    return { ...stats, memoryStats: memoryStats() }
   })
 
   ipcMain.handle(

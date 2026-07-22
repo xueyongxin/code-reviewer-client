@@ -9,7 +9,13 @@ export type ChatCommandDef = {
 }
 
 /** 本地动作类命令（不走 LLM） */
-export const LOCAL_COMMAND_KEYS = new Set(['clear', 'help', 'model', 'report'])
+export const LOCAL_COMMAND_KEYS = new Set([
+  'clear',
+  'help',
+  'model',
+  'report',
+  'remember'
+])
 
 /** 云端拉取失败时仍可用的本地命令兜底 */
 export const FALLBACK_LOCAL_COMMANDS: ChatCommandDef[] = [
@@ -48,6 +54,15 @@ export const FALLBACK_LOCAL_COMMANDS: ChatCommandDef[] = [
     description: '查看或切换关联审查报告',
     promptTemplate: '',
     sortOrder: 930
+  },
+  {
+    id: 'local-remember',
+    key: 'remember',
+    slash: '/remember',
+    name: '记住',
+    description: '将内容写入大模型记忆，如 /remember 本仓库禁止直接改生产配置',
+    promptTemplate: '',
+    sortOrder: 940
   }
 ]
 

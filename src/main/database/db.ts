@@ -1,9 +1,21 @@
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import Database from 'better-sqlite3'
-import type { AppConfig, ChatMessage, ChatSession, ReviewReport } from '../../shared/types'
+import type {
+  AppConfig,
+  ChatMessage,
+  ChatSession,
+  LlmMemory,
+  MemoryKind,
+  MemoryListQuery,
+  MemoryScope,
+  MemorySource,
+  MemoryStats,
+  ReviewReport,
+  UpsertMemoryInput
+} from '../../shared/types'
 
 let db: Database.Database | null = null
 
@@ -83,6 +95,26 @@ const ensureSchema = (database: Database.Database): void => {
       errors_json TEXT NOT NULL DEFAULT '[]',
       fetched_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS llm_memories (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      repo_url TEXT,
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      source TEXT NOT NULL DEFAULT 'manual',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_llm_memories_updated
+      ON llm_memories(updated_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_llm_memories_scope_repo
+      ON llm_memories(scope, repo_url);
   `)
 
   const chatCols = database
@@ -583,4 +615,208 @@ export const clearExtAppRepoCache = (): void => {
   getDb().prepare(`DELETE FROM ext_app_repo_cache`).run()
 }
 
+const parseTags = (raw: string | null | undefined): string[] => {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed)
+      ? parsed.filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+      : []
+  } catch {
+    return []
+  }
+}
+
+const rowToMemory = (row: {
+  id: string
+  title: string
+  content: string
+  kind: string
+  scope: string
+  repo_url: string | null
+  tags_json: string
+  enabled: number
+  source: string
+  created_at: string
+  updated_at: string
+}): LlmMemory => ({
+  id: row.id,
+  title: row.title,
+  content: row.content,
+  kind: row.kind as MemoryKind,
+  scope: row.scope as MemoryScope,
+  repoUrl: row.repo_url || undefined,
+  tags: parseTags(row.tags_json),
+  enabled: Boolean(row.enabled),
+  source: (['manual', 'remember', 'chat', 'review'].includes(row.source)
+    ? row.source
+    : 'manual') as MemorySource,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at
+})
+
+export const normalizeMemoryRepoUrl = (repoUrl?: string | null): string => {
+  const raw = (repoUrl || '').trim()
+  if (!raw) return ''
+  return raw
+    .replace(/\.git$/i, '')
+    .replace(/\/+$/, '')
+    .toLowerCase()
+}
+
+export const listLlmMemories = (query: MemoryListQuery = {}): LlmMemory[] => {
+  const rows = getDb()
+    .prepare(
+      `
+      SELECT *
+      FROM llm_memories
+      ORDER BY updated_at DESC
+      LIMIT 500
+    `
+    )
+    .all() as Array<Parameters<typeof rowToMemory>[0]>
+
+  const q = (query.q || '').trim().toLowerCase()
+  const repo = normalizeMemoryRepoUrl(query.repoUrl)
+  const scope = query.scope || 'all'
+  const kind = query.kind || 'all'
+
+  return rows
+    .map(rowToMemory)
+    .filter((m) => {
+      if (query.enabledOnly && !m.enabled) return false
+      if (kind !== 'all' && m.kind !== kind) return false
+      if (scope === 'global' && m.scope !== 'global') return false
+      if (scope === 'repo') {
+        if (m.scope !== 'repo') return false
+        if (repo && normalizeMemoryRepoUrl(m.repoUrl) !== repo) return false
+      }
+      if (!q) return true
+      const hay = `${m.title}\n${m.content}\n${m.tags.join(' ')}`.toLowerCase()
+      return hay.includes(q)
+    })
+}
+
+export const getLlmMemoryById = (id: string): LlmMemory | null => {
+  const row = getDb()
+    .prepare(`SELECT * FROM llm_memories WHERE id = ?`)
+    .get(id) as Parameters<typeof rowToMemory>[0] | undefined
+  return row ? rowToMemory(row) : null
+}
+
+export const upsertLlmMemory = (input: UpsertMemoryInput): LlmMemory => {
+  const now = new Date().toISOString()
+  const id = input.id?.trim() || randomUUID()
+  const existing = input.id ? getLlmMemoryById(id) : null
+  const scope: MemoryScope = input.scope || existing?.scope || 'global'
+  const repoUrl =
+    scope === 'repo'
+      ? normalizeMemoryRepoUrl(input.repoUrl ?? existing?.repoUrl) || undefined
+      : undefined
+  const title = (input.title || existing?.title || '').trim() || '未命名记忆'
+  const content = (input.content || existing?.content || '').trim()
+  if (!content) throw new Error('记忆内容不能为空')
+
+  const kind: MemoryKind = input.kind || existing?.kind || 'note'
+  const tags = input.tags ?? existing?.tags ?? []
+  const enabled = input.enabled ?? existing?.enabled ?? true
+  const source = input.source || existing?.source || 'manual'
+  const createdAt = existing?.createdAt || now
+
+  getDb()
+    .prepare(
+      `
+      INSERT INTO llm_memories (
+        id, title, content, kind, scope, repo_url, tags_json, enabled, source, created_at, updated_at
+      ) VALUES (
+        @id, @title, @content, @kind, @scope, @repo_url, @tags_json, @enabled, @source, @created_at, @updated_at
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        content = excluded.content,
+        kind = excluded.kind,
+        scope = excluded.scope,
+        repo_url = excluded.repo_url,
+        tags_json = excluded.tags_json,
+        enabled = excluded.enabled,
+        source = excluded.source,
+        updated_at = excluded.updated_at
+    `
+    )
+    .run({
+      id,
+      title,
+      content,
+      kind,
+      scope,
+      repo_url: repoUrl || null,
+      tags_json: JSON.stringify(tags),
+      enabled: enabled ? 1 : 0,
+      source,
+      created_at: createdAt,
+      updated_at: now
+    })
+
+  return getLlmMemoryById(id)!
+}
+
+export const deleteLlmMemory = (id: string): void => {
+  getDb().prepare(`DELETE FROM llm_memories WHERE id = ?`).run(id)
+}
+
+export const setLlmMemoryEnabled = (
+  id: string,
+  enabled: boolean
+): LlmMemory | null => {
+  const now = new Date().toISOString()
+  getDb()
+    .prepare(
+      `UPDATE llm_memories SET enabled = ?, updated_at = ? WHERE id = ?`
+    )
+    .run(enabled ? 1 : 0, now, id)
+  return getLlmMemoryById(id)
+}
+
+export const countLlmMemories = (): number => {
+  const row = getDb()
+    .prepare(`SELECT COUNT(*) AS c FROM llm_memories`)
+    .get() as { c: number }
+  return Number(row?.c || 0)
+}
+
+export const getLlmMemoryStats = (maxCount: number): MemoryStats => {
+  const total = countLlmMemories()
+  const enabledRow = getDb()
+    .prepare(`SELECT COUNT(*) AS c FROM llm_memories WHERE enabled = 1`)
+    .get() as { c: number }
+  return {
+    total,
+    enabled: Number(enabledRow?.c || 0),
+    maxCount
+  }
+}
+
+/** 删除最旧的 n 条（按 updated_at ASC） */
+export const deleteOldestLlmMemories = (n: number): number => {
+  if (n <= 0) return 0
+  const rows = getDb()
+    .prepare(
+      `SELECT id FROM llm_memories ORDER BY updated_at ASC LIMIT ?`
+    )
+    .all(n) as Array<{ id: string }>
+  const del = getDb().prepare(`DELETE FROM llm_memories WHERE id = ?`)
+  const tx = getDb().transaction((ids: string[]) => {
+    for (const id of ids) del.run(id)
+  })
+  tx(rows.map((r) => r.id))
+  return rows.length
+}
+
+/** 超出上限时清理，返回删除条数 */
+export const enforceLlmMemoryCapacity = (maxCount: number): number => {
+  const limit = Math.max(20, Math.min(1000, maxCount || 200))
+  const total = countLlmMemories()
+  if (total <= limit) return 0
+  return deleteOldestLlmMemories(total - limit)
+}
 

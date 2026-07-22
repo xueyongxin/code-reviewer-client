@@ -1,5 +1,11 @@
 import { randomUUID } from 'crypto'
-import type { ChatMessage, ChatSession, ReviewReport, SendChatPayload } from '../../shared/types'
+import type {
+  ChatMessage,
+  ChatSendResult,
+  ChatSession,
+  ReviewReport,
+  SendChatPayload
+} from '../../shared/types'
 import {
   expandSlashForLlm,
   mergeChatCommands,
@@ -19,8 +25,12 @@ import {
 } from '../database/db'
 import { splitThinkingContent } from '../../shared/chat-thinking'
 import { runChatCompletion } from './llm-chat'
+import { buildMemoryPromptBlock, distillMemoriesFromChat } from './memory-service'
 
-const buildSystemPrompt = (report: ReviewReport | null): string => {
+const buildSystemPrompt = (
+  report: ReviewReport | null,
+  memoryBlock?: string
+): string => {
   const base = [
     '你是 Reviewer 桌面端的代码审查助手，可称呼自己为「小智」。',
     '用简洁中文回答，聚焦代码质量、安全、可维护性与修复建议。',
@@ -28,6 +38,10 @@ const buildSystemPrompt = (report: ReviewReport | null): string => {
     '不确定时说明假设，不要编造不存在的文件或行号。',
     '回答前先在 <think>...</think> 中写出简要思考过程（分析步骤与结论依据），标签外只输出最终回复。'
   ]
+
+  if (memoryBlock?.trim()) {
+    base.push('', memoryBlock.trim())
+  }
 
   if (!report) {
     return base.join('\n')
@@ -114,7 +128,7 @@ export const chatService = {
     activeGeneration?.controller.abort()
   },
 
-  sendMessage: async (payload: SendChatPayload): Promise<ChatSession> => {
+  sendMessage: async (payload: SendChatPayload): Promise<ChatSendResult> => {
     const content = payload.content?.trim()
     if (!content) {
       throw new Error('消息不能为空')
@@ -166,7 +180,13 @@ export const chatService = {
         : null
 
     const config = getAppConfig()
-    const system = buildSystemPrompt(report)
+    const { block: memoryBlock, memories: usedMemories } = buildMemoryPromptBlock({
+      config,
+      repoUrl: report?.repoUrl,
+      queryText: expanded.llm,
+      skipMemory: Boolean(payload.skipMemory)
+    })
+    const system = buildSystemPrompt(report, memoryBlock)
     // 展示用短 slash；发给模型时把历史里所有 slash 用户消息重新展开
     const history = refreshed.messages.map((m) => {
       if (m.role !== 'user') return { role: m.role, content: m.content }
@@ -181,6 +201,9 @@ export const chatService = {
     const abort = new AbortController()
     const generationToken = randomUUID()
     activeGeneration = { controller: abort, token: generationToken }
+    let extractedMemories: Awaited<
+      ReturnType<typeof distillMemoriesFromChat>
+    > = []
     try {
       const result = await runChatCompletion(config, system, history, abort.signal)
       const split = splitThinkingContent(result.content)
@@ -195,6 +218,12 @@ export const chatService = {
         createdAt: new Date().toISOString()
       }
       appendChatMessage(assistantMessage)
+
+      // 自动沉淀：成功回复后从近期用户消息提炼
+      extractedMemories = distillMemoriesFromChat({
+        messages: getChatSessionById(session.id)?.messages || [],
+        repoUrl: report?.repoUrl
+      })
     } catch (error) {
       if (isAbortError(error, abort.signal)) {
         throw new GenerationCancelledError()
@@ -213,6 +242,10 @@ export const chatService = {
       }
     }
 
-    return getChatSessionById(session.id)!
+    return {
+      session: getChatSessionById(session.id)!,
+      usedMemories,
+      extractedMemories
+    }
   }
 }

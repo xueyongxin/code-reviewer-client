@@ -28,6 +28,7 @@ const zh = {
   'settings.externalApps': '代码仓库',
   'settings.mcp': 'MCP',
   'settings.models': '模型',
+  'settings.memory': '记忆',
   'settings.rules': '规则',
   'settings.loading': '正在加载配置…',
 
@@ -125,6 +126,7 @@ const en: Dict = {
   'settings.externalApps': 'Code repositories',
   'settings.mcp': 'MCP',
   'settings.models': 'Models',
+  'settings.memory': 'Memory',
   'settings.rules': 'Rules',
   'settings.loading': 'Loading settings…',
 

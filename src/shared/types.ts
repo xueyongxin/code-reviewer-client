@@ -99,6 +99,16 @@ export interface AppConfig {
   prCommentToolName?: string
   /** 允许通过 Git 克隆拉取代码到工作目录（流水线审查主路径） */
   enableGitClone: boolean
+  /** 启用大模型记忆（跨会话注入对话 / 审查） */
+  enableMemory: boolean
+  /** 自动从对话/审查沉淀记忆（默认关，避免噪声） */
+  enableMemoryAutoExtract: boolean
+  /** 记忆条数上限，超出时删除最旧条目 */
+  memoryMaxCount: number
+  /** 检索模式：keyword 关键词 / hybrid 关键词+文本相似度 */
+  memoryRetrievalMode: 'keyword' | 'hybrid'
+  /** 登录后可选云端同步记忆（默认关） */
+  enableMemoryCloudSync: boolean
   /**
    * 批量运行流水线时的最大并发数（有界队列）。
    * 默认 2，合法范围 1–5；瓶颈在网络/API，不宜按 CPU 核数拉满。
@@ -358,6 +368,70 @@ export interface SendChatPayload {
   reportId?: string
   /** 重新生成：不追加用户消息，删除末尾 assistant 后重跑 */
   regenerate?: boolean
+  /** 本轮不使用记忆注入（临时排除） */
+  skipMemory?: boolean
+}
+
+export interface ChatSendResult {
+  session: ChatSession
+  /** 本轮实际注入的记忆（可展示） */
+  usedMemories: LlmMemory[]
+  /** 自动沉淀时新写入的记忆 */
+  extractedMemories: LlmMemory[]
+}
+
+/** 记忆作用域 */
+export type MemoryScope = 'global' | 'repo'
+
+/** 记忆类型 */
+export type MemoryKind =
+  | 'preference'
+  | 'convention'
+  | 'review'
+  | 'fix'
+  | 'note'
+
+export type MemorySource = 'manual' | 'remember' | 'chat' | 'review'
+
+export interface LlmMemory {
+  id: string
+  title: string
+  content: string
+  kind: MemoryKind
+  scope: MemoryScope
+  /** scope=repo 时的仓库 URL（规范化后存储） */
+  repoUrl?: string
+  tags: string[]
+  enabled: boolean
+  source: MemorySource
+  createdAt: string
+  updatedAt: string
+}
+
+export interface MemoryListQuery {
+  q?: string
+  scope?: MemoryScope | 'all'
+  kind?: MemoryKind | 'all'
+  repoUrl?: string
+  enabledOnly?: boolean
+}
+
+export interface UpsertMemoryInput {
+  id?: string
+  title: string
+  content: string
+  kind?: MemoryKind
+  scope?: MemoryScope
+  repoUrl?: string
+  tags?: string[]
+  enabled?: boolean
+  source?: MemorySource
+}
+
+export interface MemoryStats {
+  total: number
+  enabled: number
+  maxCount: number
 }
 
 export interface McpToolInfo {
@@ -563,8 +637,32 @@ export interface ElectronAPI {
   getChatSession: (sessionId: string) => Promise<ChatSession | null>
   createChatSession: (reportId?: string) => Promise<ChatSession>
   deleteChatSession: (sessionId: string) => Promise<void>
-  sendChatMessage: (payload: SendChatPayload) => Promise<ChatSession>
+  sendChatMessage: (payload: SendChatPayload) => Promise<ChatSendResult>
   cancelChatGeneration: () => Promise<void>
+  listMemories: (query?: MemoryListQuery) => Promise<LlmMemory[]>
+  getMemory: (id: string) => Promise<LlmMemory | null>
+  upsertMemory: (input: UpsertMemoryInput) => Promise<LlmMemory>
+  deleteMemory: (id: string) => Promise<void>
+  setMemoryEnabled: (id: string, enabled: boolean) => Promise<LlmMemory | null>
+  getMemoryStats: () => Promise<MemoryStats>
+  distillChatMemories: (payload: {
+    sessionId: string
+  }) => Promise<LlmMemory[]>
+  clearOldestMemories: (count?: number) => Promise<{ deleted: number; stats: MemoryStats }>
+  exportMemories: () => Promise<
+    | { ok: true; path: string; count: number }
+    | { ok: false; canceled: true }
+  >
+  importMemories: () => Promise<
+    | { ok: true; imported: number; merged: number; memoryStats: MemoryStats }
+    | { ok: false; canceled: true }
+  >
+  importMemoriesFromMcp: () => Promise<{
+    imported: number
+    merged: number
+    detail: string
+    memoryStats: MemoryStats
+  }>
   cloudLogin: (payload: {
     email: string
     password: string

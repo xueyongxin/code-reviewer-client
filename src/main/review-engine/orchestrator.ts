@@ -15,6 +15,7 @@ import {
 import { runStaticScan } from './static-rules'
 import { toStaticRules } from './custom-rules'
 import { dedupeIssues, resolveActiveProvider, runLlmReview } from './llm-reviewer'
+import { buildMemoryPromptBlock, distillMemoriesFromReview } from './memory-service'
 import { buildMarkdownSummary, persistReportFiles } from './report-writer'
 import { notifyReviewFinished } from './notify'
 import { fetchReviewFiles, languageFromPath } from './code-fetcher'
@@ -483,11 +484,24 @@ export class ReviewOrchestrator {
           )
         }
         try {
+          const memoryPrompt = buildMemoryPromptBlock({
+            config,
+            repoUrl: report.repoUrl,
+            queryText: focusMethods.map((m) => `${m.name} ${m.description}`).join(' ')
+          })
           llmIssues = await runLlmReview(files, config, abort.signal, {
             focusHints,
             focusMethods,
-            providerId: llmProviderId
+            providerId: llmProviderId,
+            repoUrl: report.repoUrl,
+            memoryBlock: memoryPrompt.block
           })
+          if (llmIssues.length) {
+            distillMemoriesFromReview({
+              issues: llmIssues,
+              repoUrl: report.repoUrl
+            })
+          }
           for (const method of focusMethods) {
             const hit = matchMethodCount(llmIssues, method.id)
             emitFlow(

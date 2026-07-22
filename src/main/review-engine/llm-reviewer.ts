@@ -44,7 +44,8 @@ export interface LlmFocusMethod {
 
 const buildPrompt = (
   files: ReviewFileResult[],
-  focusMethods?: LlmFocusMethod[]
+  focusMethods?: LlmFocusMethod[],
+  memoryBlock?: string
 ): string => {
   const snippets = files
     .slice(0, 8)
@@ -71,9 +72,12 @@ const buildPrompt = (
         ]
       : []
 
+  const memoryLines = memoryBlock?.trim() ? [memoryBlock.trim(), ''] : []
+
   return [
     '你是资深代码审查助手。请审查下列变更代码，只找出严重真实问题（安全、正确性、数据损坏、严重缺陷）。',
     ...focusBlock,
+    ...memoryLines,
     '只返回 JSON 数组，不要其他文字。每项字段：filePath, line, severity（固定为 error）, message, ruleId。',
     '不要输出 warning / info；忽略风格与轻微可维护性建议。不要重复显而易见的 console.log 之类（静态规则已覆盖）。最多返回 24 条。',
     '',
@@ -281,6 +285,8 @@ export const runLlmReview = async (
     focusHints?: string[]
     focusMethods?: LlmFocusMethod[]
     providerId?: string
+    repoUrl?: string
+    memoryBlock?: string
   }
 ): Promise<ReviewIssue[]> => {
   if (!config.enableLlm) return []
@@ -302,7 +308,7 @@ export const runLlmReview = async (
           description: h
         }))
 
-  const prompt = buildPrompt(files, focusMethods)
+  const prompt = buildPrompt(files, focusMethods, options?.memoryBlock)
   const models = modelFallbacks(provider, config)
   let lastError = ''
 

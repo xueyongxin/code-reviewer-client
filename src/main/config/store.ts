@@ -96,6 +96,11 @@ const defaults: AppConfig = {
   updateFeedUrl: '',
   prCommentToolName: '',
   enableGitClone: true,
+  enableMemory: true,
+  enableMemoryAutoExtract: false,
+  memoryMaxCount: 200,
+  memoryRetrievalMode: 'hybrid',
+  enableMemoryCloudSync: false,
   batchReviewConcurrency: DEFAULT_BATCH_REVIEW_CONCURRENCY,
   cloud: {
     apiBase: 'http://localhost:3100',
@@ -253,6 +258,15 @@ const normalizeConfig = (raw: AppConfig): AppConfig => {
     enableLlm: raw.enableLlm ?? true,
     prCommentToolName: raw.prCommentToolName ?? '',
     enableGitClone: raw.enableGitClone ?? true,
+    enableMemory: raw.enableMemory ?? true,
+    enableMemoryAutoExtract: raw.enableMemoryAutoExtract ?? false,
+    memoryMaxCount: Math.max(
+      20,
+      Math.min(1000, Number(raw.memoryMaxCount) || 200)
+    ),
+    memoryRetrievalMode:
+      raw.memoryRetrievalMode === 'keyword' ? 'keyword' : 'hybrid',
+    enableMemoryCloudSync: raw.enableMemoryCloudSync ?? false,
     batchReviewConcurrency: clampBatchReviewConcurrency(
       raw.batchReviewConcurrency ?? DEFAULT_BATCH_REVIEW_CONCURRENCY
     ),

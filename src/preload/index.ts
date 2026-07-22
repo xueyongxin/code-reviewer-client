@@ -2,10 +2,12 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type {
   AppConfig,
   ElectronAPI,
+  MemoryListQuery,
   PostPrCommentsPayload,
   ReviewReport,
   SendChatPayload,
-  StartReviewPayload
+  StartReviewPayload,
+  UpsertMemoryInput
 } from '../shared/types'
 import { IPC_CHANNELS } from '../shared/ipc'
 
@@ -69,6 +71,22 @@ const api: ElectronAPI = {
   sendChatMessage: (payload: SendChatPayload) =>
     ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, payload),
   cancelChatGeneration: () => ipcRenderer.invoke(IPC_CHANNELS.CHAT_CANCEL),
+  listMemories: (query?: MemoryListQuery) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEMORY_LIST, query),
+  getMemory: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_GET, id),
+  upsertMemory: (input: UpsertMemoryInput) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEMORY_UPSERT, input),
+  deleteMemory: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_DELETE, id),
+  setMemoryEnabled: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEMORY_SET_ENABLED, id, enabled),
+  getMemoryStats: () => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_STATS),
+  distillChatMemories: (payload) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEMORY_DISTILL_CHAT, payload),
+  clearOldestMemories: (count?: number) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEMORY_CLEAR_OLDEST, count),
+  exportMemories: () => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_EXPORT),
+  importMemories: () => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_IMPORT),
+  importMemoriesFromMcp: () => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_IMPORT_MCP),
   cloudLogin: (payload) => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_LOGIN, payload),
   cloudLoginPhone: (payload) => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_LOGIN_PHONE, payload),
   cloudLoginSms: (payload) => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_LOGIN_SMS, payload),

@@ -14,6 +14,7 @@ import {
 } from 'antd'
 import {
   ApiOutlined,
+  BookOutlined,
   CloudServerOutlined,
   CodeOutlined,
   DownOutlined,
@@ -34,6 +35,7 @@ import { useAppStore } from '../store/useAppStore'
 import { useAppearance } from '../prefs/AppearanceProvider'
 import type { AppLocale, ThemeMode } from '../prefs/appearance'
 import ModelManagePanel from './ModelManagePanel'
+import { MemorySettingsPanel } from '../components/MemorySettingsPanel'
 import {
   DEFAULT_BATCH_REVIEW_CONCURRENCY,
   MAX_BATCH_REVIEW_CONCURRENCY,
@@ -83,6 +85,7 @@ export type SettingsSection =
   | 'mcp'
   | 'llm'
   | 'rules'
+  | 'memory'
 
 const SECTIONS: Array<{
   key: SettingsSection
@@ -101,6 +104,7 @@ const SECTIONS: Array<{
   },
   { key: 'mcp', labelKey: 'settings.mcp', icon: <CloudServerOutlined />, group: 2 },
   { key: 'llm', labelKey: 'settings.models', icon: <ApiOutlined />, group: 2 },
+  { key: 'memory', labelKey: 'settings.memory', icon: <BookOutlined />, group: 2 },
   { key: 'rules', labelKey: 'settings.rules', icon: <CodeOutlined />, group: 2 }
 ]
 
@@ -1511,6 +1515,10 @@ const ConfigPage = ({ open, onClose, initialSection = 'cloud' }: ConfigPageProps
             <ModelManagePanel config={config} saving={saving} onPersist={persist} />
           </div>
         )}
+
+        {section === 'memory' && config ? (
+          <MemorySettingsPanel config={config} saveConfig={saveConfig} />
+        ) : null}
 
         {section === 'rules' && (
           <div className="settings-main-inner">

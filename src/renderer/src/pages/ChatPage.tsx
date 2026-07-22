@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Dropdown, Modal, Select, message } from 'antd'
+import { Dropdown, Modal, Select, Tooltip, message } from 'antd'
 import {
-  AppstoreOutlined,
   ArrowUpOutlined,
   CheckOutlined,
   CloseOutlined,
   CommentOutlined,
+  ContainerOutlined,
   CopyOutlined,
   DeleteOutlined,
   DislikeOutlined,
@@ -17,13 +17,15 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SettingOutlined,
-  UpOutlined
+  StopOutlined,
+  UpOutlined,
+  VerticalAlignBottomOutlined
 } from '@ant-design/icons'
 import brandMark from '../assets/brand-mark.svg'
 import { useAppStore } from '../store/useAppStore'
 import MarkdownMessage from '../components/MarkdownMessage'
 import type { SettingsSection } from './ConfigPage'
-import type { ChatMessage, ChatSession } from '../../../shared/types'
+import type { ChatMessage, ChatSession, LlmMemory } from '../../../shared/types'
 import {
   LOCAL_COMMAND_KEYS,
   filterCommands,
@@ -160,24 +162,82 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
   const [attachments, setAttachments] = useState<
     Array<{ id: string; name: string; content: string }>
   >([])
+  const [skipMemory, setSkipMemory] = useState(false)
+  const [usedMemories, setUsedMemories] = useState<LlmMemory[]>([])
+  const [usedMemoriesOpen, setUsedMemoriesOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const loadSeqRef = useRef(0)
 
   const reportOptions = useMemo(() => {
-    const map = new Map<string, string>()
+    type Row = { id: string; repoUrl: string; createdAt: string; issueCount: number }
+    const rows: Row[] = []
     for (const item of history) {
-      map.set(item.id, `${shortRepo(item.repoUrl)} · ${item.issues.length} 问题`)
+      rows.push({
+        id: item.id,
+        repoUrl: item.repoUrl,
+        createdAt: item.createdAt || '',
+        issueCount: item.issues?.length ?? 0
+      })
     }
     if (currentReport?.id) {
-      map.set(
-        currentReport.id,
-        `${shortRepo(currentReport.repoUrl)} · ${currentReport.issues.length} 问题`
-      )
+      rows.push({
+        id: currentReport.id,
+        repoUrl: currentReport.repoUrl,
+        createdAt: currentReport.createdAt || '',
+        issueCount: currentReport.issues?.length ?? 0
+      })
     }
-    return Array.from(map.entries()).map(([value, label]) => ({ value, label }))
+    rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+
+    const seen = new Set<string>()
+    const options: Array<{ value: string; label: string; repoKey: string }> = []
+    for (const row of rows) {
+      const repoKey = row.repoUrl
+        .replace(/\.git$/i, '')
+        .replace(/\/+$/, '')
+        .toLowerCase()
+      if (!repoKey || seen.has(repoKey)) continue
+      seen.add(repoKey)
+      options.push({
+        value: row.id,
+        label: shortRepo(row.repoUrl),
+        repoKey
+      })
+    }
+    return options
   }, [history, currentReport])
+
+  /** 同一仓库只展示一条：选中旧报告时回落到该仓库最新审查 */
+  const reportSelectValue = useMemo(() => {
+    if (!reportId) return undefined
+    const all = [
+      ...history,
+      ...(currentReport ? [currentReport] : [])
+    ]
+    const hit = all.find((r) => r.id === reportId)
+    if (!hit) return undefined
+    const repoKey = hit.repoUrl
+      .replace(/\.git$/i, '')
+      .replace(/\/+$/, '')
+      .toLowerCase()
+    return (
+      reportOptions.find((o) => o.repoKey === repoKey)?.value ?? reportId
+    )
+  }, [reportId, history, currentReport, reportOptions])
+
+  // 下拉按仓库去重展示最新报告时，把内部 reportId 同步过去，避免「看见 A、实际发 B」
+  useEffect(() => {
+    if (!reportId) return
+    if (reportSelectValue && reportSelectValue !== reportId) {
+      setReportId(reportSelectValue)
+      return
+    }
+    if (!reportSelectValue) {
+      setReportId(undefined)
+    }
+  }, [reportId, reportSelectValue])
 
   const activeProvider = useMemo(() => {
     const providers = config?.llmProviders ?? []
@@ -405,8 +465,45 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
               )
               .join('\n')
       appendLocalAssistant(
-        `当前关联：${reportId || '未关联'}\n\n可选报告（/report 关键字 可切换）：\n${list}`
+        `当前关联：${reportId || '未关联'}\n\n审查过的代码仓库（/report 关键字 可切换）：\n${list}`
       )
+      return true
+    }
+    if (cmd.key === 'remember') {
+      const text = args.trim()
+      if (!text) {
+        appendLocalAssistant(
+          '用法：/remember 要记住的内容\n例如：/remember 本仓库禁止在代码里硬编码生产密钥'
+        )
+        return true
+      }
+      if (config && config.enableMemory === false) {
+        message.warning('大模型记忆已关闭，请先在设置 → 记忆中开启')
+        return true
+      }
+      try {
+        let repoUrl: string | undefined
+        if (reportId) {
+          const report = await window.electronAPI.getReportById(reportId)
+          repoUrl = report?.repoUrl
+        }
+        const saved = await window.electronAPI.upsertMemory({
+          title: text.length > 36 ? `${text.slice(0, 36)}…` : text,
+          content: text,
+          kind: 'note',
+          scope: repoUrl ? 'repo' : 'global',
+          repoUrl,
+          tags: [],
+          enabled: true,
+          source: 'remember'
+        })
+        message.success('已写入记忆')
+        appendLocalAssistant(
+          `已记住（${saved.scope === 'repo' ? '仓库级' : '全局'}）：\n${saved.content}`
+        )
+      } catch (e) {
+        message.error(e instanceof Error ? e.message : '写入记忆失败')
+      }
       return true
     }
     return false
@@ -446,11 +543,17 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
     })
 
     try {
-      const session = await window.electronAPI.sendChatMessage({
+      const result = await window.electronAPI.sendChatMessage({
         sessionId: boundSessionId ?? undefined,
         content,
-        reportId
+        reportId,
+        skipMemory
       })
+      const session = result.session
+      setUsedMemories(result.usedMemories || [])
+      if (result.extractedMemories?.length) {
+        message.success(`已自动沉淀 ${result.extractedMemories.length} 条记忆`)
+      }
       await refreshChatSessions(session.id)
       // 发送中途若已切换会话，不把回复刷到错误会话
       const currentId = useAppStore.getState().activeChatId
@@ -520,12 +623,15 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
     })
 
     try {
-      const session = await window.electronAPI.sendChatMessage({
+      const result = await window.electronAPI.sendChatMessage({
         sessionId: boundSessionId,
         content: lastUser.content,
         reportId,
-        regenerate: true
+        regenerate: true,
+        skipMemory
       })
+      const session = result.session
+      setUsedMemories(result.usedMemories || [])
       await refreshChatSessions(session.id)
       const currentId = useAppStore.getState().activeChatId
       if (currentId === boundSessionId) {
@@ -670,6 +776,28 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
           </div>
         ) : (
           <div className="chat-messages">
+            {usedMemories.length > 0 && !skipMemory ? (
+              <div className={`chat-used-memories${usedMemoriesOpen ? ' is-open' : ''}`}>
+                <button
+                  type="button"
+                  className="chat-used-memories-toggle"
+                  onClick={() => setUsedMemoriesOpen((v) => !v)}
+                >
+                  本轮用到 {usedMemories.length} 条记忆
+                  {usedMemoriesOpen ? <UpOutlined /> : <DownOutlined />}
+                </button>
+                {usedMemoriesOpen ? (
+                  <ul className="chat-used-memories-list">
+                    {usedMemories.map((m) => (
+                      <li key={m.id}>
+                        <strong>{m.title}</strong>
+                        <span>{m.content}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
             {(active?.messages ?? []).map((msg, idx) => {
               if (msg.role === 'user') {
                 const { text, attachments: msgAttachments } = splitUserMessageContent(
@@ -894,26 +1022,66 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
           />
           <div className="chat-composer-bar">
             <div className="chat-composer-left">
-              <button
-                type="button"
-                className="chat-icon-btn"
-                title="命令"
-                onClick={() => {
-                  setDraft('/')
-                  setCmdOpen(true)
-                  inputRef.current?.focus()
-                }}
+              <Tooltip title="附加文本文件" mouseEnterDelay={0.3}>
+                <button
+                  type="button"
+                  className="chat-icon-btn"
+                  aria-label="附加文本文件"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <PaperClipOutlined />
+                </button>
+              </Tooltip>
+              <Tooltip
+                title={
+                  skipMemory
+                    ? '本轮已排除记忆，点击恢复注入'
+                    : '本轮不使用记忆（临时排除，不删除已有记忆）'
+                }
+                mouseEnterDelay={0.3}
               >
-                <AppstoreOutlined />
-              </button>
-              <button
-                type="button"
-                className="chat-icon-btn"
-                title="附加文本文件"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <PaperClipOutlined />
-              </button>
+                <button
+                  type="button"
+                  className={`chat-icon-btn${skipMemory ? ' is-on' : ''}`}
+                  aria-label={skipMemory ? '恢复本轮记忆' : '本轮不使用记忆'}
+                  onClick={() => setSkipMemory((v) => !v)}
+                >
+                  {skipMemory ? <StopOutlined /> : <ContainerOutlined />}
+                </button>
+              </Tooltip>
+              {activeChatId ? (
+                <Tooltip
+                  title="沉淀本轮：从对话中提炼偏好/约定并写入记忆"
+                  mouseEnterDelay={0.3}
+                >
+                  <span className="chat-icon-btn-wrap">
+                    <button
+                      type="button"
+                      className="chat-icon-btn"
+                      aria-label="沉淀本轮对话到记忆"
+                      disabled={sending || !active?.messages?.length}
+                      onClick={() => {
+                        void (async () => {
+                          try {
+                            const list = await window.electronAPI.distillChatMemories({
+                              sessionId: activeChatId
+                            })
+                            if (!list.length) {
+                              message.info('未发现可沉淀内容（需含偏好/约定类表述）')
+                              return
+                            }
+                            message.success(`已沉淀 ${list.length} 条记忆`)
+                          } catch (e) {
+                            message.error(e instanceof Error ? e.message : '沉淀失败')
+                          }
+                        })()
+                      }}
+                    >
+                      <VerticalAlignBottomOutlined />
+                    </button>
+                  </span>
+                </Tooltip>
+              ) : null}
               <input
                 ref={fileInputRef}
                 type="file"
@@ -929,12 +1097,15 @@ const ChatPage = ({ onOpenSettings }: ChatPageProps): JSX.Element => {
                 allowClear
                 size="small"
                 variant="borderless"
-                placeholder="关联审查"
+                placeholder="审查过的代码仓库"
                 className="chat-report-select"
-                value={reportId}
+                value={reportSelectValue}
                 options={reportOptions}
+                optionLabelProp="label"
                 onChange={(value) => setReportId(value)}
-                popupMatchSelectWidth={280}
+                popupMatchSelectWidth={320}
+                dropdownStyle={{ minWidth: 280 }}
+                notFoundContent="暂无已审查仓库"
               />
             </div>
             <div className="chat-composer-right">
