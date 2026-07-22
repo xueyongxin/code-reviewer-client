@@ -264,7 +264,7 @@ export class ReviewOrchestrator {
 
       // ② 拉取代码
       emitFlow(
-        flow.begin('fetch', '② 拉取代码', '尝试 MCP → Git 克隆'),
+        flow.begin('fetch', '② 拉取代码', '经代码仓库鉴权 Git 克隆'),
         { progress: 12, progressLabel: '② 拉取代码中…' }
       )
       assertNotCancelled()
