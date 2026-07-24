@@ -76,6 +76,7 @@ import {
   cloudLoginSms,
   cloudLogout,
   cloudPullConfig,
+  cloudRefreshWorkspace,
   cloudRegister,
   cloudRegisterPhone,
   cloudSendSms,
@@ -717,6 +718,10 @@ export const registerIpcHandlers = (getWindow: () => BrowserWindow | null): void
   )
 
   ipcMain.handle(IPC_CHANNELS.CLOUD_LIST_ORGS, async () => cloudListOrgs())
+
+  ipcMain.handle(IPC_CHANNELS.CLOUD_REFRESH_WORKSPACE, async () =>
+    toRendererConfig(await cloudRefreshWorkspace())
+  )
 
   ipcMain.handle(
     IPC_CHANNELS.CLOUD_SET_ORG,

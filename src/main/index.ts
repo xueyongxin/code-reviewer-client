@@ -63,15 +63,30 @@ if (!gotLock) {
     }
   }
 
+  /** 协议回调与 loopback 可能先后到达：成功后忽略迟到的失败，避免误弹错 */
+  let lastAuthOkAt = 0
+  const notifyAuthResultSafe = (payload: {
+    ok: boolean
+    config?: Awaited<ReturnType<typeof cloudHandleAuthCallback>>
+    error?: string
+  }): void => {
+    if (!payload.ok && Date.now() - lastAuthOkAt < 15_000) {
+      console.warn('[auth] ignore late auth error after success:', payload.error)
+      return
+    }
+    if (payload.ok) lastAuthOkAt = Date.now()
+    notifyAuthResult(payload)
+  }
+
   const bindAuthUrlHandler = (): void => {
-    setBrowserAuthCompleteHandler(notifyAuthResult)
+    setBrowserAuthCompleteHandler(notifyAuthResultSafe)
     setAuthUrlHandler((url) => {
       void (async () => {
         try {
           const config = await cloudHandleAuthCallback(url)
-          notifyAuthResult({ ok: true, config })
+          notifyAuthResultSafe({ ok: true, config })
         } catch (e) {
-          notifyAuthResult({
+          notifyAuthResultSafe({
             ok: false,
             error: e instanceof Error ? e.message : '授权登录失败'
           })

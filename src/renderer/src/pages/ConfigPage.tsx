@@ -329,18 +329,7 @@ const ConfigPage = ({ open, onClose, initialSection = 'cloud' }: ConfigPageProps
     })()
   }, [section, open])
 
-  useEffect(() => {
-    return window.electronAPI.onCloudAuthComplete((payload) => {
-      void (async () => {
-        if (payload.ok && payload.config) {
-          await saveConfig(payload.config)
-          message.success('授权登录成功')
-        } else {
-          message.error(payload.error || '授权登录失败')
-        }
-      })()
-    })
-  }, [])
+  // 授权完成由 App 统一监听，避免设置页与主界面双 toast / 双处理
 
   const mcpPresets = config?.mcpPresets ?? []
   const marketplace: McpMarketplaceItem[] = config?.mcpMarketplace?.length
@@ -751,25 +740,20 @@ const ConfigPage = ({ open, onClose, initialSection = 'cloud' }: ConfigPageProps
                               },
                               {
                                 key: 'org',
-                                label: '刷新组织',
+                                label: '刷新工作区',
                                 disabled: cloudBusy,
                                 onClick: () => {
                                   void (async () => {
                                     setCloudBusy(true)
                                     try {
-                                      const orgs =
-                                        await window.electronAPI.cloudListOrgs()
-                                      if (!orgs.length) {
-                                        message.warning('没有组织')
-                                        return
-                                      }
-                                      const pick = orgs[0]
-                                      const next = await window.electronAPI.cloudSetOrg({
-                                        orgId: pick.org.id,
-                                        orgName: pick.org.name
-                                      })
+                                      const next =
+                                        await window.electronAPI.cloudRefreshWorkspace()
                                       await saveConfig(next)
-                                      message.success(`当前组织：${pick.org.name}`)
+                                      message.success(
+                                        next.cloud?.orgName
+                                          ? `当前工作区：${next.cloud.orgName}`
+                                          : '已刷新工作区'
+                                      )
                                     } catch (e) {
                                       message.error(
                                         e instanceof Error ? e.message : '失败'

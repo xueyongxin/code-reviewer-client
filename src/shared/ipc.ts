@@ -67,6 +67,7 @@ export const IPC_CHANNELS = {
   CLOUD_SYNC_ENDPOINTS: 'cloud:sync-endpoints',
   CLOUD_LOGOUT: 'cloud:logout',
   CLOUD_LIST_ORGS: 'cloud:list-orgs',
+  CLOUD_REFRESH_WORKSPACE: 'cloud:refresh-workspace',
   CLOUD_SET_ORG: 'cloud:set-org',
   CLOUD_PULL_CONFIG: 'cloud:pull-config',
   CLOUD_UPLOAD_REPORT: 'cloud:upload-report',

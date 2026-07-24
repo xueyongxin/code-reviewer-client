@@ -721,6 +721,7 @@ export interface ElectronAPI {
   cloudListOrgs: () => Promise<
     Array<{ role: string; org: { id: string; name: string; slug: string } }>
   >
+  cloudRefreshWorkspace: () => Promise<AppConfig>
   cloudSetOrg: (payload: { orgId: string; orgName: string }) => Promise<AppConfig>
   cloudPullConfig: () => Promise<{
     config: AppConfig

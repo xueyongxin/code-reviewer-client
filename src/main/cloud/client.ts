@@ -4,7 +4,7 @@ import type { AppConfig, CloudAccountConfig, ReviewReport } from '../../shared/t
 import { getAppConfig, saveAppConfig } from '../config/store'
 import { configureAutoUpdater } from '../updater'
 import { getLatestReviewReport } from '../database/db'
-import { startLoopbackAuthServer } from './loopback-auth'
+import { startLoopbackAuthServer, getActiveLoopbackPort } from './loopback-auth'
 
 type ApiEnvelope<T> = {
   code: number
@@ -12,8 +12,9 @@ type ApiEnvelope<T> = {
   data: T
 }
 
-const PROD_API_BASE = 'https://forensic.waminet.com'
-const PROD_AUTH_WEB_BASE = 'https://forensic.waminet.com'
+/** 打包版首次联系云端的启动地址；权威来源为配置中心 client-config */
+const PROD_API_BASE = 'https://codereviewer.cn'
+const PROD_AUTH_WEB_BASE = 'https://codereviewer.cn'
 const DEV_API_BASE = 'http://localhost:3100'
 const DEV_AUTH_WEB_BASE = 'http://localhost:3000'
 
@@ -47,6 +48,8 @@ const resolveAuthWebBase = (stored?: string): string => {
 
 /** 当前等待网页回调的 state */
 let pendingBrowserAuthState: string | null = null
+let pendingAuthorizeUrl: string | null = null
+let pendingLoopbackPort: number | undefined
 
 const cloudOf = (config?: AppConfig): CloudAccountConfig =>
   config?.cloud ?? {
@@ -75,7 +78,12 @@ async function apiRequest<T>(
     headers,
     body: options.body ? JSON.stringify(options.body) : undefined
   })
-  const json = (await res.json()) as ApiEnvelope<T>
+  let json: ApiEnvelope<T>
+  try {
+    json = (await res.json()) as ApiEnvelope<T>
+  } catch {
+    throw new Error(`请求失败 ${res.status}（响应非 JSON）`)
+  }
   if (!res.ok || json.code !== 0) {
     throw new Error(json.message || `请求失败 ${res.status}`)
   }
@@ -141,26 +149,57 @@ const fetchCloudProfile = async (
   }
 }
 
+/** 从 /me 取当前工作区（含个人 free），/orgs 仅企业组织不可靠 */
+const resolveOrgFromMe = async (
+  apiBase: string,
+  accessToken: string
+): Promise<{ id: string; name: string } | null> => {
+  try {
+    const me = await apiRequest<{
+      memberships?: Array<{ org?: { id: string; name: string } | null }>
+    }>('/api/v1/me', { apiBase, token: accessToken })
+    const org = me.memberships?.[0]?.org
+    if (org?.id) return { id: org.id, name: org.name }
+  } catch {
+    // ignore
+  }
+  return null
+}
+
 const persistAfterAuth = async (
   apiBase: string,
   data: {
     accessToken: string
     refreshToken: string
     user: CloudUser
-    org?: { id: string; name: string }
+    org?: { id: string; name: string } | null
   }
 ): Promise<AppConfig> => {
   let orgId = data.org?.id
   let orgName = data.org?.name
+
   if (!orgId) {
-    const orgs = await apiRequest<
-      Array<{ role: string; org: { id: string; name: string } }>
-    >('/api/v1/orgs', {
-      apiBase,
-      token: data.accessToken
-    })
-    orgId = orgs[0]?.org?.id
-    orgName = orgs[0]?.org?.name
+    const fromMe = await resolveOrgFromMe(apiBase, data.accessToken)
+    if (fromMe) {
+      orgId = fromMe.id
+      orgName = fromMe.name
+    }
+  }
+
+  // /orgs 只返回企业组织；失败或空列表不阻断登录
+  if (!orgId) {
+    try {
+      const orgs = await apiRequest<
+        Array<{ role: string; org: { id: string; name: string } }>
+      >('/api/v1/orgs', {
+        apiBase,
+        token: data.accessToken
+      })
+      orgId = orgs[0]?.org?.id
+      orgName = orgs[0]?.org?.name
+    } catch {
+      // ignore
+    }
   }
 
   const profile =
@@ -254,69 +293,150 @@ const notifyBrowserAuthComplete = (payload: {
   browserAuthCompleteHandler?.(payload)
 }
 
+/** 防止 loopback / 协议双通道或浏览器重复请求导致二次 exchange 报错 */
+let desktopExchangeInFlight: {
+  state: string
+  promise: Promise<AppConfig>
+} | null = null
+let lastDesktopExchangeOk: { state: string; config: AppConfig } | null = null
+
+/** 防止快速连点登录：序列化 cloudStartBrowserLogin 的异步初始化 */
+let browserLoginInFlight: Promise<BrowserLoginResult> | null = null
+
 /** 用一次性授权码换取会话并落盘 */
 export const cloudExchangeDesktopCode = async (
   code: string,
   state: string
 ): Promise<AppConfig> => {
   if (!code || !state) throw new Error('授权回调缺少 code 或 state')
+
+  // 同一 state 已成功：重复回调直接返回（浏览器常会打两次 /callback）
+  if (lastDesktopExchangeOk?.state === state) {
+    return lastDesktopExchangeOk.config
+  }
+  if (desktopExchangeInFlight?.state === state) {
+    return desktopExchangeInFlight.promise
+  }
+
   if (!pendingBrowserAuthState || state !== pendingBrowserAuthState) {
     throw new Error('授权状态不匹配，请从桌面端重新点击登录')
   }
 
-  const config = getAppConfig()
-  const apiBase = resolveApiBase(cloudOf(config).apiBase)
-  const data = await apiRequest<{
-    accessToken: string
-    refreshToken: string
-    user: CloudUser
-  }>('/api/v1/auth/desktop/exchange', {
-    method: 'POST',
-    apiBase,
-    body: { code, state }
-  })
+  const promise = (async () => {
+    const config = getAppConfig()
+    const apiBase = resolveApiBase(cloudOf(config).apiBase)
+    const data = await apiRequest<{
+      accessToken: string
+      refreshToken: string
+      user: CloudUser
+      org?: { id: string; name: string } | null
+    }>('/api/v1/auth/desktop/exchange', {
+      method: 'POST',
+      apiBase,
+      body: { code, state }
+    })
 
-  pendingBrowserAuthState = null
-  return persistAfterAuth(apiBase, data)
+    pendingBrowserAuthState = null
+    const next = await persistAfterAuth(apiBase, data)
+    lastDesktopExchangeOk = { state, config: next }
+    return next
+  })()
+
+  desktopExchangeInFlight = { state, promise }
+
+  try {
+    return await promise
+  } finally {
+    if (desktopExchangeInFlight?.promise === promise) {
+      desktopExchangeInFlight = null
+    }
+  }
 }
 
 /** Trae 式：打开浏览器登录页；优先本机 loopback 回调，辅以自定义协议 */
 export const cloudStartBrowserLogin = async (): Promise<BrowserLoginResult> => {
-  await cloudSyncEndpoints()
-  const config = getAppConfig()
-  const apiBase = resolveApiBase(cloudOf(config).apiBase)
-  const authWebBase = resolveAuthWebBase(cloudOf(config).authWebBase)
+  // 已有进行中的初始化（快速连点）：直接复用，避免第二次 stopLoopback 掐断第一次的端口
+  if (browserLoginInFlight) return browserLoginInFlight
 
-  const state = randomUUID()
-  pendingBrowserAuthState = state
-
-  await persistCloud({
-    apiBase,
-    authWebBase
-  })
-
-  let loopbackPort: number | undefined
-  try {
-    const loop = await startLoopbackAuthServer({
-      expectedState: state,
-      onCode: async (code, cbState) => {
-        const next = await cloudExchangeDesktopCode(code, cbState)
-        notifyBrowserAuthComplete({ ok: true, config: next })
-      },
-      onError: (error) => {
-        notifyBrowserAuthComplete({ ok: false, error })
-      }
-    })
-    loopbackPort = loop.port
-  } catch (e) {
-    console.warn('[auth] loopback server failed, fallback to protocol only', e)
+  // 已有进行中的授权：勿重启 loopback（会掐断旧 port），只重新打开同一登录页
+  if (
+    pendingBrowserAuthState &&
+    pendingAuthorizeUrl &&
+    (!pendingLoopbackPort || getActiveLoopbackPort() === pendingLoopbackPort)
+  ) {
+    await shell.openExternal(pendingAuthorizeUrl)
+    return {
+      opened: true,
+      authorizeUrl: pendingAuthorizeUrl,
+      state: pendingBrowserAuthState,
+      loopbackPort: pendingLoopbackPort
+    }
   }
 
-  const qs = new URLSearchParams({ state })
-  if (loopbackPort) qs.set('desktop_port', String(loopbackPort))
-  const authorizeUrl = `${authWebBase}/login?${qs.toString()}`
-  await shell.openExternal(authorizeUrl)
-  return { opened: true, authorizeUrl, state, loopbackPort }
+  const run = (async (): Promise<BrowserLoginResult> => {
+    await cloudSyncEndpoints()
+    const config = getAppConfig()
+    const apiBase = resolveApiBase(cloudOf(config).apiBase)
+    const authWebBase = resolveAuthWebBase(cloudOf(config).authWebBase)
+
+    const state = randomUUID()
+    pendingBrowserAuthState = state
+    lastDesktopExchangeOk = null
+
+    await persistCloud({
+      apiBase,
+      authWebBase
+    })
+
+    let loopbackPort: number | undefined
+    let authNotified = false
+    const notifyOnce = (payload: {
+      ok: boolean
+      config?: AppConfig
+      error?: string
+    }): void => {
+      if (authNotified) return
+      // 已成功后再来的失败（重复回调）直接忽略
+      if (!payload.ok && lastDesktopExchangeOk?.state === state) return
+      authNotified = true
+      if (payload.ok) {
+        pendingAuthorizeUrl = null
+        pendingLoopbackPort = undefined
+      }
+      notifyBrowserAuthComplete(payload)
+    }
+
+    try {
+      const loop = await startLoopbackAuthServer({
+        expectedState: state,
+        onCode: async (code, cbState) => {
+          const next = await cloudExchangeDesktopCode(code, cbState)
+          notifyOnce({ ok: true, config: next })
+        },
+        onError: (error) => {
+          notifyOnce({ ok: false, error })
+        }
+      })
+      loopbackPort = loop.port
+    } catch (e) {
+      console.warn('[auth] loopback server failed, fallback to protocol only', e)
+    }
+
+    const qs = new URLSearchParams({ state })
+    if (loopbackPort) qs.set('desktop_port', String(loopbackPort))
+    const authorizeUrl = `${authWebBase}/login?${qs.toString()}`
+    pendingAuthorizeUrl = authorizeUrl
+    pendingLoopbackPort = loopbackPort
+    await shell.openExternal(authorizeUrl)
+    return { opened: true, authorizeUrl, state, loopbackPort }
+  })()
+
+  browserLoginInFlight = run
+  try {
+    return await run
+  } finally {
+    if (browserLoginInFlight === run) browserLoginInFlight = null
+  }
 }
 
 const ACCOUNT_CONSOLE_PATH = '/account'
@@ -533,6 +653,51 @@ export const cloudListOrgs = async (): Promise<
   })
 }
 
+/** 刷新当前工作区：企业组织优先，否则个人工作区（/me） */
+export const cloudRefreshWorkspace = async (): Promise<AppConfig> => {
+  const cloud = cloudOf(getAppConfig())
+  if (!cloud.accessToken) throw new Error('未登录云端账号')
+  const apiBase = resolveApiBase(cloud.apiBase)
+
+  let networkFailed = false
+
+  try {
+    const orgs = await apiRequest<
+      Array<{ role: string; org: { id: string; name: string } }>
+    >('/api/v1/orgs', {
+      apiBase,
+      token: cloud.accessToken
+    })
+    if (orgs[0]?.org?.id) {
+      return persistCloud({
+        orgId: orgs[0].org.id,
+        orgName: orgs[0].org.name,
+        lastSyncAt: new Date().toISOString()
+      })
+    }
+  } catch {
+    networkFailed = true
+  }
+
+  try {
+    const fromMe = await resolveOrgFromMe(apiBase, cloud.accessToken)
+    if (fromMe) {
+      return persistCloud({
+        orgId: fromMe.id,
+        orgName: fromMe.name,
+        lastSyncAt: new Date().toISOString()
+      })
+    }
+  } catch {
+    networkFailed = true
+  }
+
+  if (networkFailed) {
+    throw new Error('网络异常，无法获取工作区信息，请稍后重试')
+  }
+  throw new Error('未找到工作区，请重新登录')
+}
+
 export const cloudSetOrg = async (orgId: string, orgName: string): Promise<AppConfig> => {
   return persistCloud({ orgId, orgName })
 }
@@ -543,9 +708,19 @@ export const cloudPullConfig = async (): Promise<{
   changed: boolean
   version?: number
 }> => {
-  const config = getAppConfig()
-  const cloud = cloudOf(config)
-  if (!cloud.accessToken || !cloud.orgId) throw new Error('请先登录并选择组织')
+  let config = getAppConfig()
+  let cloud = cloudOf(config)
+  if (!cloud.accessToken) throw new Error('请先登录云端账号')
+  if (!cloud.orgId) {
+    try {
+      config = await cloudRefreshWorkspace()
+      cloud = cloudOf(config)
+    } catch {
+      // 工作区暂时不可达（网络抖动等），不阻断配置拉取
+      return { config, changed: false }
+    }
+  }
+  if (!cloud.orgId) return { config, changed: false }
 
   const remote = await apiRequest<{
     changed: boolean
@@ -596,6 +771,12 @@ export const cloudPullConfig = async (): Promise<{
   return { config: saved, changed: true, version: remote.version }
 }
 
+/** 客户端 'completed' → 服务端枚举 'success' */
+const toServerReportStatus = (
+  s: string
+): 'pending' | 'running' | 'success' | 'failed' | 'cancelled' =>
+  s === 'completed' ? 'success' : (s as 'pending' | 'running' | 'success' | 'failed' | 'cancelled')
+
 export const cloudUploadLatestReport = async (): Promise<{ id: string }> => {
   const config = getAppConfig()
   const cloud = cloudOf(config)
@@ -615,7 +796,7 @@ export const cloudUploadLatestReport = async (): Promise<{ id: string }> => {
       branch: undefined,
       prNumber: report.prNumber,
       commitSha: report.commitSha,
-      status: report.status,
+      status: toServerReportStatus(report.status),
       visibility: 'private',
       issueCount: report.issues?.length ?? 0,
       totalDurationMs: report.totalDurationMs,
@@ -778,7 +959,7 @@ export const maybeAutoUploadReport = async (report: ReviewReport): Promise<void>
         repoUrl: report.repoUrl,
         prNumber: report.prNumber,
         commitSha: report.commitSha,
-        status: report.status,
+        status: toServerReportStatus(report.status),
         visibility: 'private',
         issueCount: report.issues?.length ?? 0,
         totalDurationMs: report.totalDurationMs,

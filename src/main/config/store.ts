@@ -30,8 +30,9 @@ import {
   mergeSecretField
 } from './secrets'
 
-const PROD_API_BASE = 'https://forensic.waminet.com'
-const PROD_AUTH_WEB_BASE = 'https://forensic.waminet.com'
+/** 打包版首次启动回退值；运行时以配置中心 client-config 为准 */
+const PROD_API_BASE = 'https://codereviewer.cn'
+const PROD_AUTH_WEB_BASE = 'https://codereviewer.cn'
 const DEV_API_BASE = 'http://localhost:3100'
 const DEV_AUTH_WEB_BASE = 'http://localhost:3000'
 

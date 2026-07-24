@@ -110,12 +110,12 @@ const throwCloneError = (
   ) {
     if (!hasGitAuthForRepo(repoUrl, mcpServerId)) {
       throw new Error(
-          'Git 克隆失败：私有仓库需要鉴权。请在「设置 → 代码仓库」连接对应平台。'
-        )
-      }
-      throw new Error(
-        'Git 克隆失败：鉴权无效。请检查代码仓库 Token 是否有效且具备仓库读权限。'
+        'Git 克隆失败：私有仓库需要鉴权。请在「设置 → 代码仓库」连接对应平台。'
       )
+    }
+    throw new Error(
+      'Git 克隆失败：鉴权无效。请检查代码仓库 Token 是否有效且具备仓库读权限。'
+    )
   }
   throw new Error(`Git 克隆失败：${raw.slice(0, 240)}`)
 }

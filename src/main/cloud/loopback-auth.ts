@@ -198,6 +198,8 @@ const successHtml = (ok: boolean, detail: string): string => {
 </html>`
 }
 
+export const getActiveLoopbackPort = (): number | null => active?.port ?? null
+
 export const stopLoopbackAuthServer = (): void => {
   if (!active) return
   try {
@@ -213,6 +215,8 @@ export const startLoopbackAuthServer = async (
   handlers: LoopbackAuthHandlers
 ): Promise<{ port: number }> => {
   stopLoopbackAuthServer()
+
+  let settling = false
 
   const server = http.createServer((req, res) => {
     const allowOrigin = '*'
@@ -250,6 +254,19 @@ export const startLoopbackAuthServer = async (
         return
       }
 
+      // 浏览器可能对同一 URL 打两次；第二次直接回成功页，避免二次 exchange 报错
+      if (settling) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end(
+          successHtml(
+            true,
+            '可以关闭此浏览器标签页，继续回到 Code Reviewer Client。'
+          )
+        )
+        return
+      }
+      settling = true
+
       void handlers
         .onCode(code, state)
         .then(() => {
@@ -266,6 +283,7 @@ export const startLoopbackAuthServer = async (
           setTimeout(() => stopLoopbackAuthServer(), 800)
         })
         .catch((e) => {
+          settling = false
           const msg = e instanceof Error ? e.message : '登录失败'
           if (!res.writableEnded) {
             res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' })

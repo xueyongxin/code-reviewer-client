@@ -114,6 +114,8 @@ const api: ElectronAPI = {
   cloudSyncEndpoints: () => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_SYNC_ENDPOINTS),
   cloudLogout: () => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_LOGOUT),
   cloudListOrgs: () => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_LIST_ORGS),
+  cloudRefreshWorkspace: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.CLOUD_REFRESH_WORKSPACE),
   cloudSetOrg: (payload) => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_SET_ORG, payload),
   cloudPullConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_PULL_CONFIG),
   cloudUploadReport: () => ipcRenderer.invoke(IPC_CHANNELS.CLOUD_UPLOAD_REPORT),
